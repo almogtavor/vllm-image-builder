@@ -1,0 +1,18 @@
+#!/bin/bash
+# Pre-commit hook to run cargo fmt
+# This ensures code formatting before committing
+
+set -e
+
+echo "Running pre-commit checks..."
+
+# Run cargo fmt check
+echo "Checking code formatting with cargo fmt..."
+if ! cargo fmt --all -- --check; then
+    echo "❌ Code formatting check failed!"
+    echo "Run 'cargo fmt --all' to fix formatting issues."
+    exit 1
+fi
+echo "✅ Code formatting check passed"
+
+echo "✅ All pre-commit checks passed!"

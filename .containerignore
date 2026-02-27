@@ -1,0 +1,16 @@
+docs/
+web/
+!web/wasm
+benchmarks/
+!benchmarks/haystack
+data*/
+target*/
+docker/
+!docker/vllm/llm-d/patches
+
+.git/
+.github/
+
+*.json
+*.md
+LICENSE
