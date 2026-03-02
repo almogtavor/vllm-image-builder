@@ -9,7 +9,7 @@ ARG PYTHON_VERSION=3.12
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 
-LABEL org.opencontainers.image.source=https://github.com/almogtavor/vllm-container-builder
+LABEL org.opencontainers.image.source=https://github.com/almogtavor/vllm-image-builder
 LABEL org.opencontainers.image.description="vLLM with Segmented Spans (omerpaz95)"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 

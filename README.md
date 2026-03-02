@@ -1,17 +1,22 @@
-# vllm-container-builder
+# vllm-image-builder
 
-Build a container image with [omerpaz95's segmented spans](https://github.com/omerpaz95/vllm/pull/2) applied on top of the official [vllm-project/vllm](https://github.com/vllm-project/vllm).
+Builds a container image of [vLLM](https://github.com/vllm-project/vllm) with [omerpaz95's segmented spans](https://github.com/omerpaz95/vllm/pull/2) feature applied on top.
 
-## How it works
+## What is this image?
 
-1. Starts from the official `nvidia/cuda` base image (same approach as vllm-project/vllm's Dockerfile)
-2. Clones [`almogtavor/vllm@segmented-spans`](https://github.com/almogtavor/vllm/tree/segmented-spans) — omerpaz95's feature commits rebased onto a stable upstream vllm commit
-3. Installs vLLM with precompiled CUDA kernels (no compilation needed since segmented spans changes are Python-only)
-4. GitHub Actions builds and pushes to `ghcr.io/almogtavor/vllm-segmented-spans-cuda`
+The output image (`ghcr.io/almogtavor/vllm-segmented-spans-cuda`) is a ready-to-run vLLM inference server that includes the **segmented spans** KV-cache optimization. It exposes the standard OpenAI-compatible API via `vllm.entrypoints.openai.api_server`.
+
+## How the build works
+
+1. Starts from the official `nvidia/cuda:12.4.1-devel-ubuntu22.04` base image (same approach as vllm-project/vllm's own Dockerfile)
+2. Clones [`almogtavor/vllm@segmented-spans`](https://github.com/almogtavor/vllm/tree/segmented-spans) — omerpaz95's segmented-spans commits cherry-picked onto a stable upstream vLLM commit (`d7de043`)
+3. Installs PyTorch and vLLM dependencies
+4. Installs vLLM with **precompiled CUDA kernels** downloaded from `wheels.vllm.ai` for the matching upstream base commit — no CUDA compilation needed since the segmented spans changes are Python-only
+5. GitHub Actions builds and pushes to `ghcr.io/almogtavor/vllm-segmented-spans-cuda`
 
 ## Configuration
 
-Edit `docker/vllm-version` to change the vllm fork, branch, or base commit.
+Edit [`docker/vllm-version`](docker/vllm-version) to change the vLLM fork, branch, or base commit.
 
 ## Building locally
 
