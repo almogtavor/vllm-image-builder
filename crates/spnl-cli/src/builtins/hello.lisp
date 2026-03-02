@@ -1,1 +1,0 @@
-(cross (user "hello"))
