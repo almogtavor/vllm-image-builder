@@ -1,4 +1,4 @@
-name: llm-d image build
+name: vllm segmented-spans image build
 
 on:
   release:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Image version tag (e.g. v0.1.0)'
+        description: 'Image version tag (e.g. v0.2.0)'
         required: true
 
 # cancel any prior runs for this workflow and this PR (or branch)
@@ -29,15 +29,18 @@ jobs:
   build_and_push:
     name: build and push
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        gpu:
-          - cuda
     steps:
       - uses: actions/checkout@v6
 
       - name: Aggressive disk space cleanup
         run: ./.github/scripts/free-up-disk-space.sh
+
+      - name: Load vllm-version config
+        run: |
+          source docker/vllm-version
+          echo "VLLM_REPO=$VLLM_REPO" >> $GITHUB_ENV
+          echo "VLLM_BRANCH=$VLLM_BRANCH" >> $GITHUB_ENV
+          echo "VLLM_BASE_COMMIT=$VLLM_BASE_COMMIT" >> $GITHUB_ENV
 
       - name: Verify release version
         run: echo "RELEASE_VERSION=$RELEASE_VERSION"
@@ -53,10 +56,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build the Container Image for ${{ matrix.gpu }}
+      - name: Build the Container Image
         uses: docker/build-push-action@v6
         with:
           push: ${{ env.RELEASE_VERSION != 'latest' }}
-          file: docker/vllm/llm-d/Containerfile.${{ matrix.gpu }}
-          tags: ghcr.io/almogtavor/vllm-segmented-spans-${{ matrix.gpu }}:${{ env.RELEASE_VERSION }},ghcr.io/almogtavor/vllm-segmented-spans-${{ matrix.gpu }}:latest
+          file: docker/Dockerfile.cuda
+          tags: ghcr.io/almogtavor/vllm-segmented-spans-cuda:${{ env.RELEASE_VERSION }},ghcr.io/almogtavor/vllm-segmented-spans-cuda:latest
           context: .
+          build-args: |
+            VLLM_REPO=${{ env.VLLM_REPO }}
+            VLLM_BRANCH=${{ env.VLLM_BRANCH }}
+            VLLM_BASE_COMMIT=${{ env.VLLM_BASE_COMMIT }}

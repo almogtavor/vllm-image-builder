@@ -1,0 +1,86 @@
+# Build vLLM with Segmented Spans from source.
+#
+# Uses the same approach as vllm-project/vllm's official Dockerfile:
+# NVIDIA CUDA base image + precompiled CUDA kernels (no compilation needed
+# since segmented spans changes are Python-only).
+
+ARG CUDA_VERSION=12.4.1
+ARG PYTHON_VERSION=3.12
+
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
+
+LABEL org.opencontainers.image.source=https://github.com/almogtavor/vllm-container-builder
+LABEL org.opencontainers.image.description="vLLM with Segmented Spans (omerpaz95)"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+ARG CUDA_VERSION
+ARG PYTHON_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System dependencies
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        software-properties-common \
+        git \
+        curl \
+        ccache \
+        libibverbs-dev \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        python${PYTHON_VERSION} \
+        python${PYTHON_VERSION}-dev \
+        python${PYTHON_VERSION}-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv (fast Python package manager)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# Create virtual environment
+RUN uv venv /opt/vllm --python ${PYTHON_VERSION}
+ENV PATH="/opt/vllm/bin:$PATH"
+ENV VIRTUAL_ENV="/opt/vllm"
+
+# uv settings
+ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_LINK_MODE=copy
+
+# CUDA compatibility
+RUN echo "/usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/" \
+    > /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
+
+# Clone vllm fork with segmented spans
+ARG VLLM_REPO=https://github.com/almogtavor/vllm.git
+ARG VLLM_BRANCH=segmented-spans
+ARG VLLM_BASE_COMMIT
+
+WORKDIR /opt/vllm-source
+RUN git clone -b ${VLLM_BRANCH} --depth 50 ${VLLM_REPO} .
+
+# Install PyTorch + vllm dependencies
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -r requirements/cuda.txt \
+    --extra-index-url https://download.pytorch.org/whl/cu$(echo ${CUDA_VERSION} | cut -d. -f1,2 | tr -d '.')
+
+# Install vllm with precompiled CUDA kernels
+# Since segmented spans changes are Python-only, we download pre-built .so
+# files from wheels.vllm.ai for the upstream base commit our fork is based on.
+ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+segmented-spans"
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/pip \
+    VLLM_USE_PRECOMPILED=1 \
+    VLLM_PRECOMPILED_WHEEL_COMMIT=${VLLM_BASE_COMMIT} \
+    uv pip install -e .
+
+# Runtime environment
+ENV VLLM_USAGE_SOURCE=production-docker-image \
+    VLLM_WORKER_MULTIPROC_METHOD=fork \
+    OUTLINES_CACHE_DIR=/tmp/outlines \
+    NUMBA_CACHE_DIR=/tmp/numba \
+    TRITON_CACHE_DIR=/tmp/triton \
+    VLLM_CACHE_ROOT=/tmp/vllm
+
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
