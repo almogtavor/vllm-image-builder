@@ -1,22 +1,25 @@
 # vllm-image-builder
 
-Builds a container image of [vLLM](https://github.com/vllm-project/vllm) with [omerpaz95's segmented spans](https://github.com/omerpaz95/vllm/pull/2) feature applied on top.
+Build a custom vLLM container image from any vLLM fork/branch. Point it at a repo and branch, and it produces a ready-to-run inference server image with precompiled CUDA kernels - no GPU compilation needed.
 
-## What is this image?
+## What does the output image contain?
 
-The output image (`ghcr.io/almogtavor/vllm-segmented-spans-cuda`) is a ready-to-run vLLM inference server that includes the **segmented spans** KV-cache optimization. It exposes the standard OpenAI-compatible API via `vllm.entrypoints.openai.api_server`.
+A vLLM inference server exposing the standard OpenAI-compatible API (`vllm.entrypoints.openai.api_server`), built from whichever vLLM fork and branch you configure.
 
 ## How the build works
 
-1. Starts from the official `nvidia/cuda:12.4.1-devel-ubuntu22.04` base image (same approach as vllm-project/vllm's own Dockerfile)
-2. Clones [`almogtavor/vllm@segmented-spans`](https://github.com/almogtavor/vllm/tree/segmented-spans) — omerpaz95's segmented-spans commits cherry-picked onto a stable upstream vLLM commit (`d7de043`)
+1. Starts from `nvidia/cuda:12.4.1-devel-ubuntu22.04` (same base as vllm-project/vllm's own Dockerfile)
+2. Clones the configured vLLM fork and branch
 3. Installs PyTorch and vLLM dependencies
-4. Installs vLLM with **precompiled CUDA kernels** downloaded from `wheels.vllm.ai` for the matching upstream base commit — no CUDA compilation needed since the segmented spans changes are Python-only
+4. Installs vLLM with **precompiled CUDA kernels** from `wheels.vllm.ai` for a matching upstream commit - this works when your fork's changes are Python-only (no custom CUDA kernels)
 5. GitHub Actions builds and pushes to `ghcr.io/almogtavor/vllm-segmented-spans-cuda`
 
 ## Configuration
 
-Edit [`docker/vllm-version`](docker/vllm-version) to change the vLLM fork, branch, or base commit.
+Edit [`docker/vllm-version`](docker/vllm-version) to set:
+- `VLLM_REPO` - the vLLM fork to clone
+- `VLLM_BRANCH` - the branch to build
+- `VLLM_BASE_COMMIT` - the upstream `vllm-project/vllm` commit your branch is based on (used to fetch matching precompiled CUDA kernels)
 
 ## Building locally
 
@@ -27,7 +30,7 @@ docker build \
   --build-arg VLLM_REPO=$VLLM_REPO \
   --build-arg VLLM_BRANCH=$VLLM_BRANCH \
   --build-arg VLLM_BASE_COMMIT=$VLLM_BASE_COMMIT \
-  -t vllm-segmented-spans:local .
+  -t vllm-custom:local .
 ```
 
 ## Triggering a release build

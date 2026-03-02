@@ -1,8 +1,8 @@
-# Build vLLM with Segmented Spans from source.
+# Build a custom vLLM image from any fork/branch.
 #
 # Uses the same approach as vllm-project/vllm's official Dockerfile:
-# NVIDIA CUDA base image + precompiled CUDA kernels (no compilation needed
-# since segmented spans changes are Python-only).
+# NVIDIA CUDA base image + precompiled CUDA kernels (works when
+# your fork's changes are Python-only).
 
 ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3.12
@@ -10,7 +10,7 @@ ARG PYTHON_VERSION=3.12
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 
 LABEL org.opencontainers.image.source=https://github.com/almogtavor/vllm-image-builder
-LABEL org.opencontainers.image.description="vLLM with Segmented Spans (omerpaz95)"
+LABEL org.opencontainers.image.description="Custom vLLM image built from fork"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 ARG CUDA_VERSION
@@ -52,7 +52,7 @@ ENV UV_LINK_MODE=copy
 RUN echo "/usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/" \
     > /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
 
-# Clone vllm fork with segmented spans
+# Clone the configured vllm fork
 ARG VLLM_REPO=https://github.com/almogtavor/vllm.git
 ARG VLLM_BRANCH=segmented-spans
 ARG VLLM_BASE_COMMIT
@@ -66,9 +66,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --extra-index-url https://download.pytorch.org/whl/cu$(echo ${CUDA_VERSION} | cut -d. -f1,2 | tr -d '.')
 
 # Install vllm with precompiled CUDA kernels
-# Since segmented spans changes are Python-only, we download pre-built .so
-# files from wheels.vllm.ai for the upstream base commit our fork is based on.
-ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+segmented-spans"
+# Download pre-built .so files from wheels.vllm.ai for the upstream base
+# commit our fork is based on (works when fork changes are Python-only).
+ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+custom"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
     VLLM_USE_PRECOMPILED=1 \
