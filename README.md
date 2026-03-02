@@ -6,7 +6,7 @@ Based on the [IBM/spnl](https://github.com/IBM/spnl) build pipeline.
 
 ## How it works
 
-1. `genpatch.sh` generates a patch from `omerpaz95/vllm@segmented_spans` (diff from merge-base to branch tip)
+1. `genpatch.sh` generates a patch from `almogtavor/vllm@segmented-spans` (cherry-picked onto the llm-d base commit)
 2. `Containerfile.cuda` applies the patch on top of `ghcr.io/llm-d/llm-d-cuda:v0.5.0`
 3. GitHub Actions builds and pushes to `ghcr.io/almogtavor/vllm-segmented-spans-cuda`
 
