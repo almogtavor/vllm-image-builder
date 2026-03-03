@@ -36,3 +36,5 @@ docker build \
 ## Triggering a release build
 
 Use **Actions → workflow_dispatch** with a version tag (e.g. `v0.2.0`), or create a GitHub release.
+
+![Workflow run instructions](assets/workflow_run_instructions.png)
