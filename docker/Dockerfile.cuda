@@ -71,8 +71,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+custom"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
-    VLLM_USE_PRECOMPILED=1 \
-    VLLM_PRECOMPILED_WHEEL_COMMIT=${VLLM_BASE_COMMIT} \
     uv pip install -e .
 
 # Runtime environment
