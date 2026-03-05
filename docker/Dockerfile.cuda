@@ -58,7 +58,7 @@ ARG VLLM_BRANCH=segmented-spans
 ARG VLLM_BASE_COMMIT
 
 WORKDIR /opt/vllm-source
-RUN git clone -b ${VLLM_BRANCH} --depth 50 ${VLLM_REPO} .
+RUN git clone ${VLLM_REPO} . && cd vllm && git checkout ${VLLM_BRANCH} && cd ..
 
 # Install PyTorch + vllm dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
