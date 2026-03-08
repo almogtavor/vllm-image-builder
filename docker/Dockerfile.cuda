@@ -70,6 +70,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # commit our fork is based on (works when fork changes are Python-only).
 ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+custom"
 RUN uv pip install setuptools-scm
+RUN apt-get update -y && apt-get install -y \
+    cmake \
+    build-essential \
+    ninja-build
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
     uv pip install -e . --no-build-isolation
