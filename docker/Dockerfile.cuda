@@ -4,7 +4,7 @@
 # NVIDIA CUDA base image + precompiled CUDA kernels (works when
 # your fork's changes are Python-only).
 
-ARG CUDA_VERSION=12.4.1
+ARG CUDA_VERSION=12.9.1
 ARG PYTHON_VERSION=3.11
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
@@ -17,6 +17,19 @@ ARG CUDA_VERSION
 ARG PYTHON_VERSION
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# ARG for your wheel URL
+ARG PRECOMPILED_WHEEL_URL="https://github.com/vllm-project/vllm/releases/download/v0.10.2/vllm-0.10.2+cu129-cp38-abi3-manylinux1_x86_64.whl"
+
+# Directory where we will store the wheel
+ENV VLLM_WHEEL_DIR=/opt/vllm-wheels
+RUN mkdir -p $VLLM_WHEEL_DIR
+
+# Download the wheel
+RUN curl -L "$PRECOMPILED_WHEEL_URL" -o $VLLM_WHEEL_DIR/vllm_precompiled.whl
+
+# Point vLLM to the wheel
+ENV VLLM_PRECOMPILED_WHEEL_LOCATION="$VLLM_WHEEL_DIR/vllm_precompiled.whl"
 
 # System dependencies
 RUN apt-get update -y \
@@ -55,7 +68,6 @@ RUN echo "/usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/" \
 # Clone the configured vllm fork
 ARG VLLM_REPO=https://github.com/almogtavor/vllm.git
 ARG VLLM_BRANCH=segmented-spans
-ARG VLLM_BASE_COMMIT
 
 WORKDIR /opt/vllm-source
 RUN git clone ${VLLM_REPO} . && cd vllm && git checkout ${VLLM_BRANCH} && cd ..
@@ -69,28 +81,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Download pre-built .so files from wheels.vllm.ai for the upstream base
 # commit our fork is based on (works when fork changes are Python-only).
 ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+custom"
-RUN uv pip install setuptools-scm
-RUN apt-get update -y && apt-get install -y \
-    build-essential \
-    ninja-build
-
-RUN apt-get install -y wget gpg
-
-RUN wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc \
-    | gpg --dearmor -o /usr/share/keyrings/kitware-archive-keyring.gpg
-
-RUN echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] \
-    https://apt.kitware.com/ubuntu/ jammy main' \
-    > /etc/apt/sources.list.d/kitware.list
-
-RUN apt-get update -y && apt-get install -y cmake
-
-ENV PYTHONUNBUFFERED=1
-
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
-    BUILDKIT_PROGRESS=plain \
-    uv -vvv pip install -e . --no-build-isolation -vvv
+    VLLM_USE_PRECOMPILED=1 \
+    VLLM_PRECOMPILED_WHEEL_LOCATION=${VLLM_PRECOMPILED_WHEEL_LOCATION} \
+    uv pip install -e .
 
 # Runtime environment
 ENV VLLM_USAGE_SOURCE=production-docker-image \
