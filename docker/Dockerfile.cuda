@@ -25,6 +25,9 @@ ARG PRECOMPILED_WHEEL_URL="https://github.com/vllm-project/vllm/releases/downloa
 ENV VLLM_WHEEL_DIR=/opt/vllm-wheels
 RUN mkdir -p $VLLM_WHEEL_DIR
 
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends curl
+
 # Download the wheel
 RUN curl -L "$PRECOMPILED_WHEEL_URL" -o $VLLM_WHEEL_DIR/vllm_precompiled.whl
 
