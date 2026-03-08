@@ -71,9 +71,20 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+custom"
 RUN uv pip install setuptools-scm
 RUN apt-get update -y && apt-get install -y \
-    cmake \
     build-essential \
     ninja-build
+
+RUN apt-get install -y wget gpg
+
+RUN wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc \
+    | gpg --dearmor -o /usr/share/keyrings/kitware-archive-keyring.gpg
+
+RUN echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] \
+    https://apt.kitware.com/ubuntu/ jammy main' \
+    > /etc/apt/sources.list.d/kitware.list
+
+RUN apt-get update -y && apt-get install -y cmake
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
     uv pip install -e . --no-build-isolation
