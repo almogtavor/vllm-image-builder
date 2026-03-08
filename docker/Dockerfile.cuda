@@ -85,9 +85,12 @@ RUN echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] \
 
 RUN apt-get update -y && apt-get install -y cmake
 
+ENV PYTHONUNBUFFERED=1
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
-    uv pip install -e . --no-build-isolation
+    BUILDKIT_PROGRESS=plain \
+    uv -vvv pip install -e . --no-build-isolation -vvv
 
 # Runtime environment
 ENV VLLM_USAGE_SOURCE=production-docker-image \
