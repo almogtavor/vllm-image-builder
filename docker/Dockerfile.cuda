@@ -5,7 +5,7 @@
 # your fork's changes are Python-only).
 
 ARG CUDA_VERSION=12.4.1
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.11
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 
@@ -17,6 +17,11 @@ ARG CUDA_VERSION
 ARG PYTHON_VERSION
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Download precompiled wheel from vllm releases
+ARG PRECOMPILED_WHEEL_URL="https://github.com/vllm-project/vllm/releases/download/v0.16.0/vllm-0.16.0-cp38-abi3-manylinux_2_31_x86_64.whl"
+ENV VLLM_WHEEL_DIR=/opt/vllm-wheels
+RUN mkdir -p $VLLM_WHEEL_DIR
 
 # System dependencies
 RUN apt-get update -y \
@@ -33,6 +38,9 @@ RUN apt-get update -y \
         python${PYTHON_VERSION}-dev \
         python${PYTHON_VERSION}-venv \
     && rm -rf /var/lib/apt/lists/*
+
+# Download the precompiled wheel
+RUN curl -L "$PRECOMPILED_WHEEL_URL" -o $VLLM_WHEEL_DIR/vllm_precompiled.whl
 
 # Install uv (fast Python package manager)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -54,8 +62,7 @@ RUN echo "/usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/" \
 
 # Clone the configured vllm fork
 ARG VLLM_REPO=https://github.com/almogtavor/vllm.git
-ARG VLLM_BRANCH=segmented-spans
-ARG VLLM_BASE_COMMIT
+ARG VLLM_BRANCH=containerized-segmented-spans
 
 WORKDIR /opt/vllm-source
 RUN git clone -b ${VLLM_BRANCH} --depth 50 ${VLLM_REPO} .
@@ -65,14 +72,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/cuda.txt \
     --extra-index-url https://download.pytorch.org/whl/cu$(echo ${CUDA_VERSION} | cut -d. -f1,2 | tr -d '.')
 
-# Install vllm with precompiled CUDA kernels
-# Download pre-built .so files from wheels.vllm.ai for the upstream base
-# commit our fork is based on (works when fork changes are Python-only).
+# Install vllm with precompiled CUDA kernels from the downloaded wheel
 ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+custom"
+ENV VLLM_PRECOMPILED_WHEEL_LOCATION="$VLLM_WHEEL_DIR/vllm_precompiled.whl"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
     VLLM_USE_PRECOMPILED=1 \
-    VLLM_PRECOMPILED_WHEEL_COMMIT=${VLLM_BASE_COMMIT} \
+    VLLM_PRECOMPILED_WHEEL_LOCATION=${VLLM_PRECOMPILED_WHEEL_LOCATION} \
     uv pip install -e .
 
 # Runtime environment
@@ -81,6 +87,7 @@ ENV VLLM_USAGE_SOURCE=production-docker-image \
     OUTLINES_CACHE_DIR=/tmp/outlines \
     NUMBA_CACHE_DIR=/tmp/numba \
     TRITON_CACHE_DIR=/tmp/triton \
-    VLLM_CACHE_ROOT=/tmp/vllm
+    VLLM_CACHE_ROOT=/tmp/vllm \
+    VLLM_ATTENTION_BACKEND=TRITON_ATTN_VLLM_V1
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
