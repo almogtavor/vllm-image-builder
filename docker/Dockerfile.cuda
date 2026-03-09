@@ -18,10 +18,9 @@ ARG PYTHON_VERSION
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Download precompiled wheel from vllm releases
-ARG PRECOMPILED_WHEEL_URL="https://github.com/vllm-project/vllm/releases/download/v0.17.0/vllm-0.17.0-cp38-abi3-manylinux_2_31_x86_64.whl"
-ENV VLLM_WHEEL_DIR=/opt/vllm-wheels
-RUN mkdir -p $VLLM_WHEEL_DIR
+# Base commit from upstream vllm that the fork is based on.
+# Used to fetch matching precompiled CUDA kernels from wheels.vllm.ai.
+ARG VLLM_BASE_COMMIT=675ec59aa94301989c3c174b3b910338c2d51ff4
 
 # System dependencies
 RUN apt-get update -y \
@@ -39,8 +38,6 @@ RUN apt-get update -y \
         python${PYTHON_VERSION}-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# Download the precompiled wheel
-RUN curl -L "$PRECOMPILED_WHEEL_URL" -o $VLLM_WHEEL_DIR/vllm_precompiled.whl
 
 # Install uv (fast Python package manager)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -72,13 +69,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/cuda.txt \
     --extra-index-url https://download.pytorch.org/whl/cu$(echo ${CUDA_VERSION} | cut -d. -f1,2 | tr -d '.')
 
-# Install vllm with precompiled CUDA kernels from the downloaded wheel
+# Install vllm with precompiled CUDA kernels from wheels.vllm.ai
+ARG VLLM_BASE_COMMIT
 ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+custom"
-ENV VLLM_PRECOMPILED_WHEEL_LOCATION="$VLLM_WHEEL_DIR/vllm_precompiled.whl"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
     VLLM_USE_PRECOMPILED=1 \
-    VLLM_PRECOMPILED_WHEEL_LOCATION=${VLLM_PRECOMPILED_WHEEL_LOCATION} \
+    VLLM_PRECOMPILED_WHEEL_COMMIT=${VLLM_BASE_COMMIT} \
     uv pip install -e .
 
 # Runtime environment
