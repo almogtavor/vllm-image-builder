@@ -96,6 +96,7 @@ ENV VLLM_USAGE_SOURCE=production-docker-image \
     OUTLINES_CACHE_DIR=/tmp/outlines \
     NUMBA_CACHE_DIR=/tmp/numba \
     TRITON_CACHE_DIR=/tmp/triton \
-    VLLM_CACHE_ROOT=/tmp/vllm
+    VLLM_CACHE_ROOT=/tmp/vllm \
+    VLLM_ATTENTION_BACKEND=TRITON_ATTN_VLLM_V1
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
