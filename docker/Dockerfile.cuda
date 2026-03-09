@@ -90,6 +90,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_PRECOMPILED_WHEEL_LOCATION=${VLLM_PRECOMPILED_WHEEL_LOCATION} \
     uv pip install -e .
 
+# Pin transformers to avoid tokenizer incompatibility with vLLM
+# (transformers >= 5.0 removed all_special_tokens_extended from TokenizersBackend)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install "transformers==4.57.3"
+
 # Runtime environment
 ENV VLLM_USAGE_SOURCE=production-docker-image \
     VLLM_WORKER_MULTIPROC_METHOD=fork \
