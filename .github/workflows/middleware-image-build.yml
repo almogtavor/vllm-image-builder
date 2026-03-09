@@ -1,12 +1,6 @@
 name: middleware image build
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'middleware/**'
-      - 'docker/Dockerfile.middleware'
-      - '.github/workflows/middleware-image-build.yml'
   workflow_dispatch:
     inputs:
       version:
@@ -14,7 +8,7 @@ on:
         required: true
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -22,9 +16,6 @@ permissions:
   packages: write
   attestations: write
   id-token: write
-
-env:
-  RELEASE_VERSION: ${{ github.event.inputs.version || 'latest' }}
 
 jobs:
   build_and_push:
@@ -38,7 +29,6 @@ jobs:
 
       - name: Login to Container Registry
         uses: docker/login-action@v3
-        if: ${{ env.RELEASE_VERSION != 'latest' }}
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -47,7 +37,7 @@ jobs:
       - name: Build the Container Image
         uses: docker/build-push-action@v6
         with:
-          push: ${{ env.RELEASE_VERSION != 'latest' }}
+          push: true
           file: docker/Dockerfile.middleware
-          tags: ghcr.io/almogtavor/spans-middleware:${{ env.RELEASE_VERSION }},ghcr.io/almogtavor/spans-middleware:latest
+          tags: ghcr.io/almogtavor/vllm-spans-middleware:${{ github.event.inputs.version }}
           context: .

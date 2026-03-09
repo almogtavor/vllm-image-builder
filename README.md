@@ -38,3 +38,83 @@ docker build \
 Use **Actions → workflow_dispatch** with a version tag (e.g. `v0.2.0`), or create a GitHub release.
 
 ![Workflow run instructions](assets/workflow_run_instructions.png)
+
+## Spans middleware
+
+A lightweight Python sidecar that transforms chat completion requests into span-optimized token prompts before forwarding to vLLM.
+
+**Image:** `ghcr.io/almogtavor/vllm-spans-middleware:<version>`
+
+### Building the middleware image
+
+Use **Actions → middleware image build → workflow_dispatch** with a version tag.
+
+### Deploying on OpenShift
+
+```bash
+oc apply -n $USER-ns -f - <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spans-middleware
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spans-middleware
+  template:
+    metadata:
+      labels:
+        app: spans-middleware
+    spec:
+      containers:
+        - name: middleware
+          image: ghcr.io/almogtavor/vllm-spans-middleware:<version>
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SPAN_MODE
+              value: "spans"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spans-middleware
+spec:
+  selector:
+    app: spans-middleware
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: spans-middleware
+spec:
+  to:
+    kind: Service
+    name: spans-middleware
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+EOF
+```
+
+### Testing the middleware
+
+```bash
+HOST=$(oc get route spans-middleware -n $USER-ns -o jsonpath='{.spec.host}')
+
+curl -sk https://$HOST/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [{"role": "user", "content": "Hello, how are you?"}],
+    "max_tokens": 50
+  }'
+```
+
+> **Note:** The middleware expects vLLM at `http://0.0.0.0:8000/v1` — deploy it as a sidecar in the same pod as vLLM, or modify the source to make the URL configurable.
