@@ -61,7 +61,7 @@ jobs:
         with:
           push: ${{ env.RELEASE_VERSION != 'latest' }}
           file: docker/Dockerfile.cuda
-          tags: ghcr.io/almogtavor/vllm-segmented-spans-cuda:${{ env.RELEASE_VERSION }},ghcr.io/almogtavor/vllm-segmented-spans-cuda:latest
+          tags: ghcr.io/almogtavor/vllm-segmented-spans:${{ env.RELEASE_VERSION }},ghcr.io/almogtavor/vllm-segmented-spans:latest
           context: .
           build-args: |
             VLLM_REPO=${{ env.VLLM_REPO }}
