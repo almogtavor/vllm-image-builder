@@ -4,7 +4,7 @@
 # NVIDIA CUDA base image + precompiled CUDA kernels (works when
 # your fork's changes are Python-only).
 
-ARG CUDA_VERSION=12.4.1
+ARG CUDA_VERSION=13.0.2
 ARG PYTHON_VERSION=3.11
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
