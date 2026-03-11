@@ -5,7 +5,7 @@
 # your fork's changes are Python-only).
 
 ARG CUDA_VERSION=12.4.1
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.11
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 
@@ -17,6 +17,22 @@ ARG CUDA_VERSION
 ARG PYTHON_VERSION
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# ARG for your wheel URL
+ARG PRECOMPILED_WHEEL_URL="https://github.com/vllm-project/vllm/releases/download/v0.10.2/vllm-0.10.2+cu129-cp38-abi3-manylinux1_x86_64.whl"
+
+# Directory where we will store the wheel
+ENV VLLM_WHEEL_DIR=/opt/vllm-wheels
+RUN mkdir -p $VLLM_WHEEL_DIR
+
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends curl
+
+# Download the wheel
+RUN curl -L "$PRECOMPILED_WHEEL_URL" -o $VLLM_WHEEL_DIR/vllm_precompiled.whl
+
+# Point vLLM to the wheel
+ENV VLLM_PRECOMPILED_WHEEL_LOCATION="$VLLM_WHEEL_DIR/vllm_precompiled.whl"
 
 # System dependencies
 RUN apt-get update -y \
@@ -55,10 +71,9 @@ RUN echo "/usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/" \
 # Clone the configured vllm fork
 ARG VLLM_REPO=https://github.com/almogtavor/vllm.git
 ARG VLLM_BRANCH=segmented-spans
-ARG VLLM_BASE_COMMIT
 
 WORKDIR /opt/vllm-source
-RUN git clone -b ${VLLM_BRANCH} --depth 50 ${VLLM_REPO} .
+RUN git clone ${VLLM_REPO} . && cd vllm && git checkout ${VLLM_BRANCH} && cd ..
 
 # Install PyTorch + vllm dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -72,8 +87,13 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+custom"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
     VLLM_USE_PRECOMPILED=1 \
-    VLLM_PRECOMPILED_WHEEL_COMMIT=${VLLM_BASE_COMMIT} \
+    VLLM_PRECOMPILED_WHEEL_LOCATION=${VLLM_PRECOMPILED_WHEEL_LOCATION} \
     uv pip install -e .
+
+# Pin transformers to avoid tokenizer incompatibility with vLLM
+# (transformers >= 5.0 removed all_special_tokens_extended from TokenizersBackend)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install "transformers==4.57.3"
 
 # Runtime environment
 ENV VLLM_USAGE_SOURCE=production-docker-image \
@@ -81,6 +101,7 @@ ENV VLLM_USAGE_SOURCE=production-docker-image \
     OUTLINES_CACHE_DIR=/tmp/outlines \
     NUMBA_CACHE_DIR=/tmp/numba \
     TRITON_CACHE_DIR=/tmp/triton \
-    VLLM_CACHE_ROOT=/tmp/vllm
+    VLLM_CACHE_ROOT=/tmp/vllm \
+    VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
