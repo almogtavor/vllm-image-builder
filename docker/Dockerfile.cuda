@@ -19,7 +19,7 @@ ARG PYTHON_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
 
 # ARG for your wheel URL
-ARG PRECOMPILED_WHEEL_URL="https://github.com/vllm-project/vllm/releases/download/v0.10.2/vllm-0.10.2+cu129-cp38-abi3-manylinux1_x86_64.whl"
+ARG PRECOMPILED_WHEEL_URL="https://github.com/vllm-project/vllm/releases/download/v0.15.0/vllm-0.15.0+cu130-cp38-abi3-manylinux_2_35_x86_64.whl"
 
 # Directory where we will store the wheel
 ENV VLLM_WHEEL_DIR=/opt/vllm-wheels
