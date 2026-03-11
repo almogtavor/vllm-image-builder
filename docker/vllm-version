@@ -1,6 +1,6 @@
 # vllm fork with segmented spans (omerpaz95's feature)
 VLLM_REPO=https://github.com/IBM/vllm.git
-VLLM_BRANCH=cdae9f9c3ef633541242d56772bec3368846a4b6
+VLLM_BRANCH=main
 
 # Upstream vllm-project/vllm commit that the segmented-spans branch is based on.
 # Used to download matching precompiled CUDA kernels from wheels.vllm.ai.
