@@ -5,7 +5,7 @@
 # your fork's changes are Python-only).
 
 ARG CUDA_VERSION=12.4.1
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.11
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 
@@ -17,6 +17,10 @@ ARG CUDA_VERSION
 ARG PYTHON_VERSION
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Base commit from upstream vllm that the fork is based on.
+# Used to fetch matching precompiled CUDA kernels from wheels.vllm.ai.
+ARG VLLM_BASE_COMMIT=675ec59aa94301989c3c174b3b910338c2d51ff4
 
 # System dependencies
 RUN apt-get update -y \
@@ -33,6 +37,7 @@ RUN apt-get update -y \
         python${PYTHON_VERSION}-dev \
         python${PYTHON_VERSION}-venv \
     && rm -rf /var/lib/apt/lists/*
+
 
 # Install uv (fast Python package manager)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -53,9 +58,8 @@ RUN echo "/usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/" \
     > /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
 
 # Clone the configured vllm fork
-ARG VLLM_REPO=https://github.com/almogtavor/vllm.git
-ARG VLLM_BRANCH=segmented-spans
-ARG VLLM_BASE_COMMIT
+ARG VLLM_REPO=https://github.com/omerpaz95/vllm.git
+ARG VLLM_BRANCH=segmented_spans
 
 WORKDIR /opt/vllm-source
 RUN git clone -b ${VLLM_BRANCH} --depth 50 ${VLLM_REPO} .
@@ -65,9 +69,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/cuda.txt \
     --extra-index-url https://download.pytorch.org/whl/cu$(echo ${CUDA_VERSION} | cut -d. -f1,2 | tr -d '.')
 
-# Install vllm with precompiled CUDA kernels
-# Download pre-built .so files from wheels.vllm.ai for the upstream base
-# commit our fork is based on (works when fork changes are Python-only).
+# Install vllm with precompiled CUDA kernels from wheels.vllm.ai
+ARG VLLM_BASE_COMMIT
 ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+custom"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \

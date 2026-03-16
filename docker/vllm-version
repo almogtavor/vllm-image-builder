@@ -1,7 +1,6 @@
-# vllm fork with segmented spans (omerpaz95's feature)
-VLLM_REPO=https://github.com/almogtavor/vllm.git
-VLLM_BRANCH=segmented-spans-rebased
+# vllm fork with containerized segmented spans (omerpaz95's feature)
+VLLM_REPO=https://github.com/omerpaz95/vllm.git
+VLLM_BRANCH=segmented_spans
 
-# Upstream vllm-project/vllm commit that the segmented-spans branch is based on.
-# Used to download matching precompiled CUDA kernels from wheels.vllm.ai.
-VLLM_BASE_COMMIT=b8401cde0ebb8ea3896f809fc84d6e7ea5eb830e
+# Upstream vllm-project/vllm commit that the branch is based on.
+VLLM_BASE_COMMIT=675ec59aa94301989c3c174b3b910338c2d51ff4
