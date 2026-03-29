@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Image version tag (e.g. v0.2.0)'
-        required: true
+        description: 'Image version tag override (leave empty for auto date_hash tag)'
+        required: false
 
 # cancel any prior runs for this workflow and this PR (or branch)
 concurrency:
@@ -21,9 +21,6 @@ permissions:
   packages: write
   attestations: write
   id-token: write
-
-env:
-  RELEASE_VERSION: ${{ github.event.inputs.version || github.event.release.tag_name || 'latest' }}
 
 jobs:
   build_and_push:
@@ -42,7 +39,21 @@ jobs:
           echo "VLLM_BRANCH=$VLLM_BRANCH" >> $GITHUB_ENV
           echo "VLLM_BASE_COMMIT=$VLLM_BASE_COMMIT" >> $GITHUB_ENV
 
-      - name: Verify release version
+      - name: Resolve image version from fork's latest commit
+        run: |
+          # If a manual version was provided, use it. Otherwise, auto-generate
+          # a tag from the fork's latest commit: YYYY-MM-DD-<short-sha>
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "RELEASE_VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+          elif [ -n "${{ github.event.release.tag_name }}" ]; then
+            echo "RELEASE_VERSION=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
+          else
+            LATEST_SHA=$(git ls-remote "$VLLM_REPO" "refs/heads/$VLLM_BRANCH" | cut -c1-8)
+            COMMIT_DATE=$(TZ=UTC date +%Y-%m-%d)
+            echo "RELEASE_VERSION=${COMMIT_DATE}-${LATEST_SHA}" >> $GITHUB_ENV
+          fi
+
+      - name: Print resolved version
         run: echo "RELEASE_VERSION=$RELEASE_VERSION"
 
       - name: Set up Docker Buildx
@@ -50,7 +61,6 @@ jobs:
 
       - name: Login to Container Registry
         uses: docker/login-action@v3
-        if: ${{ env.RELEASE_VERSION != 'latest' }}
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -59,7 +69,7 @@ jobs:
       - name: Build the Container Image
         uses: docker/build-push-action@v6
         with:
-          push: ${{ env.RELEASE_VERSION != 'latest' }}
+          push: ${{ github.event_name != 'pull_request' }}
           file: docker/Dockerfile.cuda
           tags: ghcr.io/almogtavor/vllm-segmented-spans:${{ env.RELEASE_VERSION }},ghcr.io/almogtavor/vllm-segmented-spans:latest
           context: .
