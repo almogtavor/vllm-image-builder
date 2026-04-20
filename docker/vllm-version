@@ -1,6 +1,6 @@
 # vllm fork with containerized segmented spans (omerpaz95's feature)
 VLLM_REPO=https://github.com/omerpaz95/vllm.git
-VLLM_BRANCH=segmented_spans
+VLLM_BRANCH=segmented_spans_no_spec_tokens
 # VLLM_FORK_COMMIT is unused - the Dockerfile clones the latest from VLLM_BRANCH
 # VLLM_FORK_COMMIT=b415e8133cff45cf1e8e9ffcde53274c41b81c62
 
