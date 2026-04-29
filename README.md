@@ -12,11 +12,12 @@ A vLLM inference server exposing the standard OpenAI-compatible API (`vllm.entry
 2. Clones the configured vLLM fork and branch
 3. Installs PyTorch and vLLM dependencies
 4. Installs vLLM with **precompiled CUDA kernels** from `wheels.vllm.ai` for a matching upstream commit - this works when your fork's changes are Python-only (no custom CUDA kernels)
-5. GitHub Actions builds and pushes to `ghcr.io/almogtavor/vllm-segmented-spans-cuda`
+5. GitHub Actions builds and pushes to `ghcr.io/almogtavor/<image-name>`
 
 ## Configuration
 
 Edit [`docker/vllm-version`](docker/vllm-version) to set:
+- `IMAGE_NAME` - the GHCR package name to publish
 - `VLLM_REPO` - the vLLM fork to clone
 - `VLLM_BRANCH` - the branch to build
 - `VLLM_BASE_COMMIT` - the upstream `vllm-project/vllm` commit your branch is based on (used to fetch matching precompiled CUDA kernels)

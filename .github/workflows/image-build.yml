@@ -1,4 +1,4 @@
-name: vllm segmented-spans image build
+name: vllm image build
 
 on:
   release:
@@ -35,6 +35,7 @@ jobs:
       - name: Load vllm-version config
         run: |
           source docker/vllm-version
+          echo "IMAGE_NAME=$IMAGE_NAME" >> $GITHUB_ENV
           echo "VLLM_REPO=$VLLM_REPO" >> $GITHUB_ENV
           echo "VLLM_BRANCH=$VLLM_BRANCH" >> $GITHUB_ENV
           echo "VLLM_BASE_COMMIT=$VLLM_BASE_COMMIT" >> $GITHUB_ENV
@@ -54,7 +55,9 @@ jobs:
           fi
 
       - name: Print resolved version
-        run: echo "RELEASE_VERSION=$RELEASE_VERSION"
+        run: |
+          echo "IMAGE_NAME=$IMAGE_NAME"
+          echo "RELEASE_VERSION=$RELEASE_VERSION"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -71,7 +74,7 @@ jobs:
         with:
           push: ${{ github.event_name != 'pull_request' }}
           file: docker/Dockerfile.cuda
-          tags: ghcr.io/almogtavor/vllm-segmented-spans:${{ env.RELEASE_VERSION }},ghcr.io/almogtavor/vllm-segmented-spans:latest
+          tags: ghcr.io/almogtavor/${{ env.IMAGE_NAME }}:${{ env.RELEASE_VERSION }},ghcr.io/almogtavor/${{ env.IMAGE_NAME }}:latest
           context: .
           build-args: |
             VLLM_REPO=${{ env.VLLM_REPO }}

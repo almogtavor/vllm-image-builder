@@ -1,8 +1,11 @@
-# vllm fork with containerized segmented spans (omerpaz95's feature)
+# Target image/package name in GHCR.
+IMAGE_NAME=vllm-prophet-kv
+
+# vLLM fork/branch to build.
 VLLM_REPO=https://github.com/omerpaz95/vllm.git
-VLLM_BRANCH=support-gpt-oss-120b
+VLLM_BRANCH=feature/prophet_kv
 # VLLM_FORK_COMMIT is unused - the Dockerfile clones the latest from VLLM_BRANCH
-# VLLM_FORK_COMMIT=b415e8133cff45cf1e8e9ffcde53274c41b81c62
+# VLLM_FORK_COMMIT=464520da04a606613ed05184b4ab93aca71071b1
 
 # Upstream vllm-project/vllm commit that the branch is based on.
-VLLM_BASE_COMMIT=675ec59aa94301989c3c174b3b910338c2d51ff4
+VLLM_BASE_COMMIT=a3e2e250f09d7a347cfdccfe2f7b593edd1b7bce
