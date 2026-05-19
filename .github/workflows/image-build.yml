@@ -7,6 +7,15 @@ on:
     branches: [ main ]
   workflow_dispatch:
     inputs:
+      repo:
+        description: 'vLLM fork git URL (leave empty to use docker/vllm-version)'
+        required: false
+      branch:
+        description: 'Branch to build (leave empty to use docker/vllm-version)'
+        required: false
+      base_commit:
+        description: 'Upstream vllm-project/vllm commit the branch is based on (leave empty to use docker/vllm-version)'
+        required: false
       version:
         description: 'Image version tag override (leave empty for auto date_hash tag)'
         required: false
@@ -34,10 +43,21 @@ jobs:
 
       - name: Load vllm-version config
         run: |
+          # Defaults come from the committed docker/vllm-version file;
+          # workflow_dispatch inputs override any value that is provided.
           source docker/vllm-version
-          echo "VLLM_REPO=$VLLM_REPO" >> $GITHUB_ENV
-          echo "VLLM_BRANCH=$VLLM_BRANCH" >> $GITHUB_ENV
-          echo "VLLM_BASE_COMMIT=$VLLM_BASE_COMMIT" >> $GITHUB_ENV
+          REPO_INPUT="${{ github.event.inputs.repo }}"
+          BRANCH_INPUT="${{ github.event.inputs.branch }}"
+          BASE_COMMIT_INPUT="${{ github.event.inputs.base_commit }}"
+          echo "VLLM_REPO=${REPO_INPUT:-$VLLM_REPO}" >> $GITHUB_ENV
+          echo "VLLM_BRANCH=${BRANCH_INPUT:-$VLLM_BRANCH}" >> $GITHUB_ENV
+          echo "VLLM_BASE_COMMIT=${BASE_COMMIT_INPUT:-$VLLM_BASE_COMMIT}" >> $GITHUB_ENV
+
+      - name: Print resolved source
+        run: |
+          echo "VLLM_REPO=$VLLM_REPO"
+          echo "VLLM_BRANCH=$VLLM_BRANCH"
+          echo "VLLM_BASE_COMMIT=$VLLM_BASE_COMMIT"
 
       - name: Resolve image version from fork's latest commit
         run: |
