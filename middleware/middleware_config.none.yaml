@@ -1,0 +1,40 @@
+# Middleware config for the "full" full-recompute baseline.
+#
+# Identical to middleware_config.yaml EXCEPT span_policy is "none": the middleware
+# declares NO message as a PIC span, so it sends no span_starts to vLLM and every
+# request is a plain full-context call - true full recompute. This replaces the old
+# "full = gap-policy at GAP_LENGTH=1000000" approach, which livelocked the scheduler
+# (a huge gap must not livelock). With no spans, warmup is also a no-op, so it is
+# disabled explicitly. The vLLM-side gap policy is OFF for full (helmfile).
+
+server:
+  host: "0.0.0.0"
+  port: 9000
+
+backend:
+  base_url: "http://localhost:8000/v1"  # Overridden by VLLM_ADDRESS; set by the helm chart in-cluster.
+  api_key: "vllm"
+  timeout: 900
+  model: "google/gemma-4-31B-it"        # Overridden by MODEL_NAME.
+
+model:
+  model_id: "google/gemma-4-31B-it"     # Overridden by MODEL_NAME.
+
+processing:
+  span_policy: none     # Declare NO spans -> full recompute every request (see span_policy.py).
+  padding:
+    pad_token_id: 27    # Pad token id (overridden by VLLM_V1_SPANS_PAD_TOKEN).
+  warmup:
+    enabled: false      # No spans to prime -> warmup is a no-op; disabled explicitly.
+    cache_size: 2048
+
+logging:
+  output_dir: "/tmp/middleware_logs"
+  metrics:
+    enabled: false
+    format: "json"
+    file_pattern: "metrics_{timestamp}.json"
+  responses:
+    enabled: true
+    format: "json"
+    file_pattern: "response_{request_id}.json"

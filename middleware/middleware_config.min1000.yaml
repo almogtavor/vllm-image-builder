@@ -1,0 +1,41 @@
+# Middleware config for the "atleast1000" sweep variant.
+#
+# Same as middleware_config.yaml EXCEPT the span policy is purely length-based:
+# every message is a span CANDIDATE (all_messages), but a unit only actually
+# becomes a PIC span if its real (unpadded) token length exceeds min_span_tokens
+# (1000). So only large messages - typically big file reads / tool outputs - are
+# cached as spans; short messages stay in-context. This isolates the effect of
+# caching only the long spans (where reuse matters most).
+
+server:
+  host: "0.0.0.0"
+  port: 9000
+
+backend:
+  base_url: "http://localhost:8000/v1"  # Overridden by VLLM_ADDRESS; set by the helm chart in-cluster.
+  api_key: "vllm"
+  timeout: 900
+  model: "google/gemma-4-31B-it"        # Overridden by MODEL_NAME.
+
+model:
+  model_id: "google/gemma-4-31B-it"     # Overridden by MODEL_NAME.
+
+processing:
+  span_policy: all_messages   # every message is a candidate; the length filter below decides.
+  min_span_tokens: 1000       # only units > 1000 real tokens become spans.
+  padding:
+    pad_token_id: 27          # Pad token id (overridden by VLLM_V1_SPANS_PAD_TOKEN).
+  warmup:
+    enabled: true             # prime each (long) span before the real request.
+    cache_size: 2048
+
+logging:
+  output_dir: "/tmp/middleware_logs"
+  metrics:
+    enabled: false
+    format: "json"
+    file_pattern: "metrics_{timestamp}.json"
+  responses:
+    enabled: true
+    format: "json"
+    file_pattern: "response_{request_id}.json"

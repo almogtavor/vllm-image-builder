@@ -1,0 +1,44 @@
+# Example middleware configuration.
+#
+# The middleware is render-only: vLLM's render endpoint owns tokenization and
+# chat-template rendering, and vLLM's /v1/chat/completions/parse owns response
+# parsing. The middleware's only token work is padding each per-message chunk
+# to a block boundary (for PIC span reuse).
+
+# Host and port this middleware exposes.
+server:
+  host: "0.0.0.0"
+  port: 9000
+
+# The vLLM server this middleware renders/generates/parses against.
+backend:
+  base_url: "http://localhost:8000/v1"  # Overridden by VLLM_ADDRESS; set by the helm chart in-cluster.
+  api_key: "vllm"
+  timeout: 900
+  model: "google/gemma-4-31B-it"        # Overridden by MODEL_NAME.
+
+model:
+  model_id: "google/gemma-4-31B-it"     # Overridden by MODEL_NAME.
+
+processing:
+  span_policy: tool_file_read   # Only code-file *read* tool responses become PIC spans
+                                # (writes/sed -i/exec/grep -l are rejected). See span_policy.py.
+                                # Use all_messages to make every message a span.
+  padding:
+    pad_token_id: 27      # Pad token id (overridden by VLLM_V1_SPANS_PAD_TOKEN).
+  warmup:
+    enabled: true         # Prefill each per-message span before the real request
+                          # (overridden by MIDDLEWARE_WARMUP_ENABLED).
+    cache_size: 2048      # Per-worker LRU of already-warmed spans; skip re-warming.
+                          # 0 disables dedup. (overridden by MIDDLEWARE_WARMUP_CACHE_SIZE)
+
+logging:
+  output_dir: "/tmp/middleware_logs"
+  metrics:
+    enabled: false
+    format: "json"
+    file_pattern: "metrics_{timestamp}.json"
+  responses:
+    enabled: true
+    format: "json"
+    file_pattern: "response_{request_id}.json"

@@ -1,0 +1,84 @@
+[project]
+name = "middleware"
+version = "0.1.0"
+description = "A middleware for OpenAI-compatible APIs with flexible prompt processing capabilities"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "openai>=1.0.0",
+    "transformers>=4.35.0",
+    "pyyaml>=6.0",
+    "httpx>=0.24.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+# Test dependencies
+test = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.11.0",
+]
+# All optional dependencies
+all = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.11.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+# Pytest configuration for middleware tests
+
+# Test discovery patterns
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+
+# Test paths
+testpaths = ["tests"]
+
+# Output options
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+    "--disable-warnings",
+]
+
+# Markers for organizing tests
+markers = [
+    "unit: Unit tests for individual components",
+    "integration: Integration tests for combined functionality",
+    "e2e: End-to-end tests for complete workflows",
+    "slow: Tests that take longer to execute",
+]
+
+# Minimum Python version
+minversion = "3.8"
+
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", "*/test_*.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+]

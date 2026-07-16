@@ -1,0 +1,56 @@
+# Dedicated middleware image for SGLang-server modes (QCFuse, RedKnot, …).
+# Same middleware as the vLLM image, but built for the sglang tokenizing path:
+#  - transformers/tokenizers for local chat-template rendering (SglangClient)
+#  - the Qwen3-32B tokenizer BAKED IN at build time (public repo, no token) so the
+#    pod never downloads at runtime — avoids the OpenShift /tmp/.cache PermissionError
+#    and works without HF_TOKEN in the middleware pod.
+#  - the committed sglang/ shared client copied to /workspace/sglang.
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+LABEL org.opencontainers.image.source=https://github.ibm.com/AICoOptimization/kvcache-bench
+LABEL org.opencontainers.image.description="Middleware for SGLang backends (local tokenize + /generate)"
+
+WORKDIR /app
+
+# Writable, world-accessible HF cache so any OpenShift random UID can read the
+# baked tokenizer. HOME=/tmp keeps other tools happy.
+ENV HOME=/tmp
+ENV HF_HOME=/opt/hf
+# Load the baked tokenizer from cache only — never hit the network at runtime.
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
+ENV MIDDLEWARE_CONFIG_PATH=/app/middleware_config.yaml
+
+RUN uv pip install --system --no-cache-dir \
+    fastapi \
+    uvicorn[standard] \
+    openai \
+    pyyaml \
+    pydantic \
+    httpx \
+    transformers \
+    sentencepiece \
+    tokenizers \
+    jinja2
+
+# Bake the Qwen3-32B tokenizer into the image. Downloaded on the host into
+# middleware/_qwen_tokenizer (public repo, no token) and COPY'd in — no build-time
+# network. World-readable so the random pod UID can load it offline.
+# SglangClient loads it via SGLANG_TOKENIZER_PATH (set below), not the HF hub.
+COPY middleware/_qwen_tokenizer/ /opt/qwen-tokenizer/
+# Big-model tokenizers (Qwen3.5-397B-A17B-FP8, DeepSeek-V4-Flash) baked the same way;
+# a deployment selects one via SGLANG_TOKENIZER_PATH env (default stays Qwen3-32B).
+COPY middleware/_qwen35_397b_tokenizer/ /opt/qwen35-397b-tokenizer/
+COPY middleware/_dsv4_flash_tokenizer/ /opt/dsv4-flash-tokenizer/
+COPY middleware/_qwen35_35b_tokenizer/ /opt/qwen35-35b-tokenizer/
+RUN chmod -R a+rX /opt/qwen-tokenizer /opt/qwen35-397b-tokenizer /opt/dsv4-flash-tokenizer /opt/qwen35-35b-tokenizer
+ENV SGLANG_TOKENIZER_PATH=/opt/qwen-tokenizer
+
+COPY middleware/ /app/
+COPY sglang/ /workspace/sglang/
+
+RUN mkdir -p /tmp/middleware_logs && chmod -R 0777 /tmp/middleware_logs
+
+EXPOSE 8080
+
+ENTRYPOINT ["uvicorn", "middleware:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080"]
