@@ -697,6 +697,14 @@ def create_app(
             request_id, len(full_prompt), len(span_starts),
         )
 
+        # Cap the completion so prompt + output fits the backend context window.
+        # Injected review turns (and span padding) are invisible to the agent's
+        # own truncation math, so near-cap prompts would otherwise 400 with
+        # "maximum context length is N tokens".
+        ctx_limit = int(os.environ.get("BACKEND_MAX_MODEL_LEN", "92160"))
+        if max_tokens is not None:
+            max_tokens = max(16, min(max_tokens, ctx_limit - len(full_prompt)))
+
         # Use backend model if configured, otherwise use request model
         backend_model = config.backend.model if config.backend.model else model
 
