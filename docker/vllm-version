@@ -1,7 +1,7 @@
 # vllm fork: gemma-4 + segmented spans, merged onto upstream main (engine-based
 # gemma4 parsers + synced chat template; no externally-mounted jinja needed).
 VLLM_REPO=https://github.com/almogtavor/vllm.git
-VLLM_BRANCH=feature/gemma4-spans-vllm-v0.23.0
+VLLM_BRANCH=feature/spans-prerotate-k
 
 # Upstream vllm-project/vllm commit the branch is merged onto (a7fdfeef7, #45690).
 # Must match the branch's compiled code so VLLM_USE_PRECOMPILED kernels are ABI-
