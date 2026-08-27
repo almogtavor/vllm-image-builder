@@ -78,6 +78,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_PRECOMPILED_WHEEL_COMMIT=${VLLM_BASE_COMMIT} \
     uv pip install -e .
 
+# transformers is only floor-pinned by the fork (>= 5.5.3), so an unpinned build
+# drifts to the latest release. From 5.13 the per-layer config guard turns the
+# global head_dim read in model_arch_config_convertor.get_head_size into
+# AmbiguousGlobalPerLayerAttributeError, and every gemma-4 server crashloops at
+# startup. 5.12.1 is what the proven 2026-06-27 build shipped for gemma-4 and
+# MiniMax alike; installed after vllm so it wins the resolution.
+ARG TRANSFORMERS_VERSION=5.12.1
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install "transformers==${TRANSFORMERS_VERSION}"
+
 # Runtime environment
 ENV VLLM_USAGE_SOURCE=production-docker-image \
     VLLM_WORKER_MULTIPROC_METHOD=fork \
