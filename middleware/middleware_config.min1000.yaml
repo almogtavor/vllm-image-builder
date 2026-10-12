@@ -1,16 +1,21 @@
-# Middleware config for the "atleast1000" sweep variant.
+# Middleware config for the min-1000 span-floor arm.
 #
-# Same as middleware_config.yaml EXCEPT the span policy is purely length-based:
-# every message is a span CANDIDATE (all_messages), but a unit only actually
-# becomes a PIC span if its real (unpadded) token length exceeds min_span_tokens
-# (1000). So only large messages - typically big file reads / tool outputs - are
-# cached as spans; short messages stay in-context. This isolates the effect of
-# caching only the long spans (where reuse matters most).
+# IDENTICAL to middleware_config.yaml except min_span_tokens. The floor is the
+# ONLY variable that may differ from the floor-0 arm: the previous version of this
+# file also switched span_policy to all_messages, which made "floor 0 vs floor
+# 1000" two changes at once and left any difference between them uninterpretable.
+# tool_file_read (which covers the `view` tool, see span_policy.py) is what the
+# floor-0 grid runs, so it is what this must run.
+#
+# min_span_tokens is applied where spans are assembled, not inside the policy, so
+# it composes with tool_file_read exactly as it did with all_messages.
 
+# Host and port this middleware exposes.
 server:
   host: "0.0.0.0"
   port: 9000
 
+# The vLLM server this middleware renders/generates/parses against.
 backend:
   base_url: "http://localhost:8000/v1"  # Overridden by VLLM_ADDRESS; set by the helm chart in-cluster.
   api_key: "vllm"
@@ -21,13 +26,18 @@ model:
   model_id: "google/gemma-4-31B-it"     # Overridden by MODEL_NAME.
 
 processing:
-  span_policy: all_messages   # every message is a candidate; the length filter below decides.
-  min_span_tokens: 1000       # only units > 1000 real tokens become spans.
+  span_policy: tool_file_read   # Only code-file *read* tool responses become PIC spans
+                                # (writes/sed -i/exec/grep -l are rejected). See span_policy.py.
+                                # MUST match middleware_config.yaml -- see header.
+  min_span_tokens: 1000         # Only units longer than this become spans. The one
+                                # intended difference from the floor-0 config.
   padding:
-    pad_token_id: 27          # Pad token id (overridden by VLLM_V1_SPANS_PAD_TOKEN).
+    pad_token_id: 27      # Pad token id (overridden by VLLM_V1_SPANS_PAD_TOKEN).
   warmup:
-    enabled: true             # prime each (long) span before the real request.
-    cache_size: 2048
+    enabled: true         # Prefill each per-message span before the real request
+                          # (overridden by MIDDLEWARE_WARMUP_ENABLED).
+    cache_size: 2048      # Per-worker LRU of already-warmed spans; skip re-warming.
+                          # 0 disables dedup. (overridden by MIDDLEWARE_WARMUP_CACHE_SIZE)
 
 logging:
   output_dir: "/tmp/middleware_logs"

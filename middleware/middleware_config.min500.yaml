@@ -32,7 +32,10 @@ processing:
   padding:
     pad_token_id: 27          # Pad token id (overridden by VLLM_V1_SPANS_PAD_TOKEN).
   warmup:
-    enabled: true             # prime each (long) span before the real request.
+    # OFF: spans are built on-the-fly inside the measured request. Priming them with separate
+    # requests first moves the prefill cost outside the request being timed, which makes any
+    # TTFT measured here understate the real work.
+    enabled: false
     cache_size: 2048
 
 logging:

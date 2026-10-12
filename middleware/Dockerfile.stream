@@ -1,0 +1,11 @@
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+LABEL org.opencontainers.image.description="Spans middleware + SSE streaming (real TTFT)"
+WORKDIR /app
+ENV HOME=/tmp
+ENV MIDDLEWARE_CONFIG_PATH=/app/middleware_config.yaml
+RUN uv pip install --system --no-cache-dir \
+    fastapi uvicorn[standard] openai pyyaml pydantic httpx transformers sentencepiece tokenizers
+COPY . /app/
+RUN mkdir -p /tmp/middleware_logs && chmod -R 0777 /tmp/middleware_logs
+EXPOSE 8080
+ENTRYPOINT ["uvicorn", "middleware:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080"]

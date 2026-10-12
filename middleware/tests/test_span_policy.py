@@ -19,6 +19,15 @@ def _bash_call(call_id, command):
          "function": {"name": "bash", "arguments": '{"command": "%s"}' % command}}]}
 
 
+def _view_call(call_id, path, view_range=None, name="view"):
+    args = {"path": path, "view_range": view_range}
+    if path is None:
+        args.pop("path")
+    return {"role": "assistant", "tool_calls": [
+        {"id": call_id, "type": "function",
+         "function": {"name": name, "arguments": args}}]}
+
+
 def _tool_result(call_id, content="..."):
     return {"role": "tool", "tool_call_id": call_id, "content": content}
 
@@ -84,6 +93,59 @@ def test_tool_file_read_requires_matching_call():
     policy = ToolFileReadSpanPolicy()
     # tool result with no preceding bash call (orphan id) -> not selected
     assert policy.select_spans([_tool_result("missing", "def f(): ...")]) == set()
+
+
+def test_tool_file_read_marks_view_response():
+    """`view` is the agent's main file-read path; its response is a PIC span."""
+    policy = ToolFileReadSpanPolicy()
+    msgs = [
+        _view_call("v1", "/testbed/astropy/modeling/separable.py"),
+        _tool_result("v1", "     1\timport numpy as np"),
+    ]
+    assert policy.select_spans(msgs) == {1}
+
+
+def test_tool_file_read_view_ranged_and_json_args():
+    """A ranged view still reads deterministically, like `sed -n '1,40p'`."""
+    policy = ToolFileReadSpanPolicy()
+    msgs = [
+        _view_call("a", "src/utils.py", view_range=[1, 40]),          _tool_result("a"),
+        {"role": "assistant", "tool_calls": [                          # JSON-string args
+            {"id": "b", "type": "function",
+             "function": {"name": "view",
+                          "arguments": '{"path": "app/server.ts"}'}}]}, _tool_result("b"),
+    ]
+    assert policy.select_spans(msgs) == {1, 3}
+
+
+def test_tool_file_read_view_accepts_every_path():
+    """EVERY view response is a span, whatever the path.
+
+    `view` is read-only by construction, so the code-extension gate that `bash`
+    needs (to tell reads from writes) only discarded reusable bytes here:
+    extensionless files, unlisted extensions and directory listings are all
+    deterministic reads and recur verbatim across steps.
+    """
+    policy = ToolFileReadSpanPolicy()
+    msgs = [
+        _view_call("a", "README"),         _tool_result("a"),   # no extension
+        _view_call("b", None),             _tool_result("b"),   # no path at all
+        _view_call("c", "setup.cfg"),      _tool_result("c"),   # unlisted ext
+        _view_call("d", "docs/index.rst"), _tool_result("d"),   # unlisted ext
+        _view_call("e", "src/"),           _tool_result("e"),   # directory
+        _view_call("f", "Makefile"),       _tool_result("f"),   # extensionless
+    ]
+    assert policy.select_spans(msgs) == {1, 3, 5, 7, 9, 11}
+
+
+def test_tool_file_read_view_name_variants():
+    """Exact `view` and namespaced `__view` count; `preview` must not."""
+    policy = ToolFileReadSpanPolicy()
+    assert ToolFileReadSpanPolicy._is_view("view")
+    assert ToolFileReadSpanPolicy._is_view("mcp__environment__view")
+    assert not ToolFileReadSpanPolicy._is_view("preview")
+    msgs = [_view_call("p", "a.py", name="preview"), _tool_result("p")]
+    assert policy.select_spans(msgs) == set()
 
 
 def test_tool_file_read_namespaced_bash_name():
@@ -355,3 +417,33 @@ def test_tool_file_read_summary_log_suppressed_when_no_spans(caplog):
         assert policy.select_spans(msgs) == set()
     records = [r.getMessage() for r in caplog.records]
     assert not any('selected' in m for m in records)
+
+
+def test_context_messages_excludes_system_and_query():
+    from span_policy import get_span_policy
+    p = get_span_policy("context_messages")
+    msgs = [{"role": "system", "content": "s"},
+            {"role": "user", "content": "passage A"},
+            {"role": "user", "content": "passage B"},
+            {"role": "tool", "content": "page dump"},
+            {"role": "user", "content": "Question: ...?"}]
+    # spans are the context only: not the system prompt (0), not the query (4),
+    # otherwise the question cannot attend to what it is asking about.
+    assert p.select_spans(msgs) == {1, 2, 3}
+
+
+def test_context_messages_skips_assistant_turns():
+    from span_policy import get_span_policy
+    p = get_span_policy("context_messages")
+    msgs = [{"role": "system", "content": "s"},
+            {"role": "user", "content": "ctx"},
+            {"role": "assistant", "content": "prior answer"},
+            {"role": "user", "content": "now?"}]
+    assert p.select_spans(msgs) == {1}
+
+
+def test_context_messages_degenerate_inputs():
+    from span_policy import get_span_policy
+    p = get_span_policy("context_messages")
+    assert p.select_spans([]) == set()
+    assert p.select_spans([{"role": "user", "content": "only"}]) == set()

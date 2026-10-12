@@ -1,0 +1,49 @@
+# Middleware config for the "min-100" span-floor variant (MTRAG and other RAG workloads).
+#
+# Same as middleware_config.min500.yaml except the span floor is 100 real tokens.
+#
+# WHY 100 AND NOT 500: the floor has to come from the unit-size distribution of the workload,
+# never inherited. Measured on MTRAG's recorded retrievals, passages are median 356 tokens
+# (p90 549, max 705). At a 500-token floor only 27.5% of passages are span-eligible, so
+# two-thirds of the content that actually recurs would stay prefix-chained and MTRAG would
+# look like it had no reuse. At 100 the figure is 90.6%.
+#
+# The opposite holds for corpora whose tokens concentrate in a few huge units (ITBench k8s
+# objects): there 500 keeps 93.7% of tokens at HALF the span count, and span count is the
+# accuracy dial. Do not copy this file's floor to such a workload.
+
+server:
+  host: "0.0.0.0"
+  port: 9000
+
+backend:
+  base_url: "http://localhost:8000/v1"  # Overridden by VLLM_ADDRESS; set by the helm chart in-cluster.
+  api_key: "vllm"
+  timeout: 900
+  model: "google/gemma-4-31B-it"        # Overridden by MODEL_NAME.
+
+model:
+  model_id: "google/gemma-4-31B-it"     # Overridden by MODEL_NAME.
+
+processing:
+  span_policy: all_messages   # every message is a candidate; the length filter below decides.
+  min_span_tokens: 100        # only units > 100 real tokens become spans.
+  padding:
+    pad_token_id: 27          # Pad token id (overridden by VLLM_V1_SPANS_PAD_TOKEN).
+  warmup:
+    # OFF: spans are built on-the-fly inside the measured request. Priming them with separate
+    # requests first moves the prefill cost outside the request being timed, which makes any
+    # TTFT measured here understate the real work.
+    enabled: false
+    cache_size: 2048
+
+logging:
+  output_dir: "/tmp/middleware_logs"
+  metrics:
+    enabled: false
+    format: "json"
+    file_pattern: "metrics_{timestamp}.json"
+  responses:
+    enabled: true
+    format: "json"
+    file_pattern: "response_{request_id}.json"

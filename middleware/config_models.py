@@ -2,7 +2,8 @@
 Pydantic models for middleware configuration.
 """
 
-from typing import Optional
+import os
+from typing import List, Optional
 
 import yaml
 from pydantic import BaseModel, Field
@@ -61,6 +62,14 @@ class ProcessingConfig(BaseModel):
         "exceeds this (0 = no minimum). The 'atleast1000' variant sets 1000 so only "
         "large messages become spans. Overridden by MIDDLEWARE_MIN_SPAN_TOKENS.",
     )
+    qcfuse_query_token_ids: List[int] = Field(
+        default_factory=list,
+        description="Token ids of the fixed query sentence appended to the tail of "
+        "every PIC span, block-aligned, before the generation prompt. QCFuse scores "
+        "the newest span against it; empty disables the append entirely. Must equal "
+        "VLLM_V1_SPANS_QCFUSE_QUERY_TOKEN_IDS on the backend - the engine rejects a "
+        "mismatch. Overridden by MIDDLEWARE_QCFUSE_QUERY_TOKEN_IDS (comma-separated).",
+    )
 
 
 class MetricsLoggingConfig(BaseModel):
@@ -97,9 +106,17 @@ class MiddlewareConfig(BaseModel):
     
     @classmethod
     def from_yaml(cls, path: str) -> "MiddlewareConfig":
-        """Load configuration from YAML file."""
+        """Load configuration from YAML file.
+
+        MIDDLEWARE_LOG_DIR overrides logging.output_dir. The config file is mounted
+        from a ConfigMap shared by every cell, so the only way to give each release a
+        durable per-run directory on the results PVC is from the environment.
+        """
         with open(path, 'r') as f:
             config_dict = yaml.safe_load(f)
+        log_dir = os.environ.get("MIDDLEWARE_LOG_DIR", "").strip()
+        if log_dir:
+            config_dict.setdefault("logging", {})["output_dir"] = log_dir
         return cls(**config_dict)
     
     def to_yaml(self, path: str) -> None:

@@ -1,0 +1,6 @@
+# Thin overlay: identical to the base middleware except span_policy.py, which now
+# accepts the `view` tool as a deterministic code-file read. Keeping it an overlay
+# means the ONLY delta from the images used in earlier passes is the span policy.
+ARG BASE
+FROM ${BASE}
+COPY middleware/span_policy.py /app/span_policy.py

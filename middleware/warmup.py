@@ -28,6 +28,11 @@ class WarmupResult:
     expected_cached_tokens: int = 0                        # tokens the real request should hit
     per_chunk: Dict[int, dict] = field(default_factory=dict)  # chunk index -> trace warmup dict
     calls: int = 0                                         # backend warm calls actually made
+    # Tokens warmup itself PREFILLED. The real request then reports these as
+    # cached_tokens, so counting only (prompt_tokens - cached_tokens) as compute
+    # credits warmup's prefill to nobody and can put "tokens saved" above 100%.
+    # True prefill for a request = (prompt_tokens - cached_tokens) + this.
+    computed_tokens: int = 0
 
 
 class SpanCache(LRUCache):
@@ -67,6 +72,17 @@ def _response_cached_tokens(resp) -> Optional[int]:
     return ct if ct is not None else 0
 
 
+def _warm_compute(info: dict) -> int:
+    """Tokens a warm call actually prefilled.
+
+    When the backend reports no cached_tokens we cannot prove any of it was
+    reused, so charge the whole prefill rather than assume it was free.
+    """
+    call = info.get("backend_call") or {}
+    rc = call.get("real_compute_tokens")
+    return rc if rc is not None else (call.get("prefill_tokens") or 0)
+
+
 def _warm_one(client, tokens, span_starts, cross_span_starts, model,
               temperature, seed, cache, label) -> Optional[dict]:
     """Issue one max_tokens=1 prefill, with content-keyed dedup + logging.
@@ -101,6 +117,7 @@ def _warm_one(client, tokens, span_starts, cross_span_starts, model,
     return {"key": key, "decision": "warmed",
             "backend_call": {
                 "cached_tokens": cached,
+                "prefill_tokens": len(tokens),
                 "real_compute_tokens": len(tokens) - cached if cached is not None else None,
                 "round_trip_ms": round(ms, 1),
             },
@@ -115,6 +132,7 @@ def warm_pic(
     temperature: float = 0.0,
     seed: Optional[int] = None,
     cache: Optional[SpanCache] = None,
+    gap_length: int = 0,
 ) -> WarmupResult:
     """Warm a request's spans before the real call, given a ``BuiltPrompt``.
 
@@ -160,9 +178,12 @@ def warm_pic(
         if info is None:
             continue
         result.primed_keys.append(info.pop("key"))
-        result.expected_cached_tokens += len(toks)
+        # The gap policy recomputes each span's first gap_length tokens against the
+        # real prefix, so only the tail beyond the gap can come back as a cache hit.
+        result.expected_cached_tokens += max(0, len(toks) - gap_length)
         if info["decision"] == "warmed":
             result.calls += 1
+            result.computed_tokens += _warm_compute(info)
         result.per_chunk[idx] = {"kind": "per_pic", **info}
 
     # Phase 2: cumulative prefix for each non-span chunk that precedes a span.
@@ -182,6 +203,7 @@ def warm_pic(
         info.pop("evicted_key")  # cumulative prefixes aren't tracked as spans
         if info["decision"] == "warmed":
             result.calls += 1
+            result.computed_tokens += _warm_compute(info)
         result.per_chunk[i] = {"kind": "cumulative", "label": f"cumulative→{s}",
                                "covers_chunks": list(range(i + 1)),
                                "xargs": {"span_starts": sub_spans,
@@ -199,6 +221,7 @@ def revalidate(
     temperature: float = 0.0,
     seed: Optional[int] = None,
     cache: Optional[SpanCache] = None,
+    gap_length: int = 0,
 ) -> bool:
     """Self-heal the warmup cache when the real request's hits don't add up.
 
@@ -224,5 +247,5 @@ def revalidate(
     if cache is not None:
         for key in result.primed_keys:
             cache.discard(key)
-    warm_pic(client, built, model, temperature, seed, cache=cache)
+    warm_pic(client, built, model, temperature, seed, cache=cache, gap_length=gap_length)
     return True

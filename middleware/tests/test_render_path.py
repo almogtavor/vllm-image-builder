@@ -39,7 +39,7 @@ def test_process_prompt_pads_per_message_chunks_to_block(mock_render_cls):
     def render_chat(messages, tools=None, add_generation_prompt=True):
         if add_generation_prompt:
             return full
-        return full[:5]  # prefix for messages[:1]
+        return full[:5] if len(messages) == 1 else full[:18]  # prefix for messages[:1]; gen prompt = full[18:]
     render_instance = Mock()
     render_instance.render_chat.side_effect = render_chat
     render_instance.fetch_block_size.return_value = 16  # block_size sourced from vLLM
@@ -53,14 +53,15 @@ def test_process_prompt_pads_per_message_chunks_to_block(mock_render_cls):
     built = proc.process_prompt(msgs, tools=tools)   # pic=None -> every message is a span
     out, span_starts = built.token_ids, built.span_starts
 
-    # chunk0 (5 tokens) padded to 16, chunk1 (15) unpadded => 31
-    assert len(out) == 31
-    assert out[16:] == full[5:20]               # last chunk starts at block boundary 16
+    # chunk0 (5) padded to 16, span chunk1 (13) padded to 16, gen-prompt tail (2) unpadded => 34
+    assert len(out) == 34
+    assert out[16:28] == full[5:17] and out[28:31] == [60] * 3 and out[31] == full[17] and out[32:] == full[18:20]
     assert out[:16].count(60) == 11             # pad tokens inserted into chunk0
-    # span_starts: chunk0 at 0, chunk1 at 16 (block-aligned)
     assert span_starts == [0, 16]
-    assert all(s % 16 == 0 for s in span_starts)
-    assert built.cross_span_starts == []        # adjacent all-PIC spans -> no cross
+    # adjacent spans share no cross; the trailing span ends at the gen prompt, so the
+    # query and decode get a cross and can read the prefix
+    assert built.cross_span_starts == [32]
+    assert [c["kind"] for c in built.chunks] == ["span", "span", "non"]
     # render was given the tools
     assert render_instance.render_chat.call_args_list[0].kwargs.get("tools") == tools
 
@@ -87,21 +88,21 @@ def test_build_pic_prompt_all_spans_alignment():
     def render_chat(messages, tools=None, add_generation_prompt=True):
         if add_generation_prompt:
             return full
-        return {1: full[:7], 2: full[:18]}[len(messages)]
+        return {1: full[:7], 2: full[:18], 3: full[:36]}[len(messages)]  # gen prompt = full[36:]
     rc = Mock(); rc.render_chat.side_effect = render_chat
 
     msgs = [{"role": "a", "content": "x"}, {"role": "b", "content": "y"}, {"role": "c", "content": "z"}]
     built = build_pic_prompt(rc, msgs, None, pad_token_id=60, block_size=16)
     out = built.token_ids
 
-    # chunk0: 7 -> 16, chunk1: 11 -> 16, chunk2: 22 (last, unpadded) => 54
-    assert len(out) == 54
+    # chunk0: 7 -> 16, chunk1: 11 -> 16, span2: 18 -> 32, gen-prompt tail: 4 (unpadded) => 68
+    assert len(out) == 68
     assert out[0:16] == full[0:6] + [60] * 9 + [full[6]]
     assert out[16:32] == full[7:17] + [60] * 5 + [full[17]]
-    assert out[32:] == full[18:40]              # last chunk starts exactly at offset 32
+    assert out[64:] == full[36:40]              # the trailing span ends where the gen prompt starts
     assert built.span_starts == [0, 16, 32]     # every message a span
     assert all(s % 16 == 0 for s in built.span_starts)
-    assert built.cross_span_starts == []        # adjacent all-PIC spans -> dropped
+    assert built.cross_span_starts == [64]      # adjacent spans share no cross; the tail reads the prefix
 
 
 def test_build_pic_prompt_interleaved():
@@ -144,6 +145,8 @@ def test_build_pic_prompt_groups_adjacent_tool_messages():
         k = len(messages)
         if k == 1:
             return full[:16]        # user unit end (stable)
+        if k == 4:
+            return full[:28]        # whole conversation, no gen prompt
         return full[:20] + [9999]   # any cut past the user (assistant/tool) -> unstable
 
     rc = Mock(); rc.render_chat.side_effect = render_chat
@@ -155,9 +158,9 @@ def test_build_pic_prompt_groups_adjacent_tool_messages():
 
     # pic=None -> every UNIT a span: [user] [assistant,tool,tool]
     kinds = [(c["kind"], c["start"], c["end"]) for c in built.chunks]
-    assert kinds == [("span", 0, 16), ("span", 16, 32)]
+    assert kinds == [("span", 0, 16), ("span", 16, 32), ("non", 32, 36)]
     assert built.span_starts == [0, 16]
-    assert built.token_ids[16:] == full[16:]    # assistant+tool run is one intact slice
+    assert [t for t in built.token_ids[16:] if t != 60] == full[16:]  # assistant+tool run is one intact slice
     # neither the assistant cut (messages[:2]) nor the intra-tool cut (messages[:3])
     # may be requested -> only the user boundary (k=1) is probed
     prefix_lens = [len(c.args[0]) if c.args else len(c.kwargs["messages"])
@@ -176,7 +179,7 @@ def test_build_pic_prompt_mixed_pic_tool_run_stays_incontext():
     def render_chat(messages, tools=None, add_generation_prompt=True):
         if add_generation_prompt:
             return full
-        return {1: full[:16]}[len(messages)]   # only the user boundary is probed
+        return {1: full[:16], 4: full[:28]}[len(messages)]   # user boundary + gen prompt start
 
     rc = Mock(); rc.render_chat.side_effect = render_chat
     msgs = [{"role": "user", "content": "u"},
@@ -192,7 +195,7 @@ def test_build_pic_prompt_mixed_pic_tool_run_stays_incontext():
     # the whole assistant+tool unit selected -> it is one span
     rc.render_chat.side_effect = render_chat
     built = build_pic_prompt(rc, msgs, None, 60, 16, pic={1, 2, 3})
-    assert [c["kind"] for c in built.chunks] == ["non", "span"]
+    assert [c["kind"] for c in built.chunks] == ["non", "span", "non"]
     assert built.span_starts == [16]
     c = built.chunks[1]                                       # run intact at the tail
     assert (c["kind"], c["start"], c["end"]) == ("span", 16, 32)
@@ -204,7 +207,7 @@ def test_boundary_cache_reuses_verified_prefixes():
     from processors import BoundaryCache, build_pic_prompt
 
     cache = BoundaryCache()
-    full1 = list(range(0, 32))            # 3 messages, unit-0 ends at token 16
+    full1 = list(range(0, 36))            # 3 messages, unit-0 ends at token 16
     full2 = list(range(0, 48))            # +2 messages; old tokens unchanged
 
     # A tool run trails the assistant so an assistant+tool turn is one unit (an
@@ -219,22 +222,22 @@ def test_boundary_cache_reuses_verified_prefixes():
                      {"role": "tool", "content": "r2"}]
 
     def rc1(messages, tools=None, add_generation_prompt=True):
-        return full1 if add_generation_prompt else {1: full1[:16]}[len(messages)]
+        return full1 if add_generation_prompt else {1: full1[:16], 3: full1[:32]}[len(messages)]
 
     def rc2(messages, tools=None, add_generation_prompt=True):
-        return full2 if add_generation_prompt else {1: full2[:16], 3: full2[:32]}[len(messages)]
+        return full2 if add_generation_prompt else {1: full2[:16], 3: full2[:32], 5: full2[:44]}[len(messages)]
 
     r1 = Mock(); r1.render_chat.side_effect = rc1
     built1 = build_pic_prompt(r1, msgs1, None, 60, 16, boundary_cache=cache)
-    assert built1.render_calls == 2                 # full + boundary@1 (cold)
+    assert built1.render_calls == 3                 # full + boundary@1 + gen prompt@3 (cold)
 
     r2 = Mock(); r2.render_chat.side_effect = rc2
     built2 = build_pic_prompt(r2, msgs2, None, 60, 16, boundary_cache=cache)
-    assert built2.render_calls == 2                 # full + boundary@3; @1 from cache
+    assert built2.render_calls == 2                 # full + gen prompt@5; @1 and @3 (msgs1's gen prompt) cached
     requested = [len(c.kwargs.get("messages", c.args[0] if c.args else []))
                  for c in r2.render_chat.call_args_list
                  if not c.kwargs.get("add_generation_prompt", True)]
-    assert requested == [3]                         # messages[:1] never re-rendered
+    assert requested == [5]                         # messages[:1] and [:3] never re-rendered
     assert built2.span_starts == [0, 16, 32]        # boundaries identical to uncached
 
 
@@ -247,7 +250,7 @@ def test_boundary_cache_digest_mismatch_falls_back_to_render():
     full = list(range(0, 32))
 
     def rc(messages, tools=None, add_generation_prompt=True):
-        return full if add_generation_prompt else {1: full[:16]}[len(messages)]
+        return full if add_generation_prompt else {1: full[:16], 2: full[:28]}[len(messages)]
 
     msgs = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
     # poison: right key, wrong digest (as if the template changed)
@@ -255,7 +258,7 @@ def test_boundary_cache_digest_mismatch_falls_back_to_render():
 
     r = Mock(); r.render_chat.side_effect = rc
     built = build_pic_prompt(r, msgs, None, 60, 16, boundary_cache=cache)
-    assert built.render_calls == 2                  # fell back to a real render
+    assert built.render_calls == 3                  # fell back to a real render (+ gen prompt)
     assert built.span_starts == [0, 16]
     # cache healed: rebuilt entry now hits
     r2 = Mock(); r2.render_chat.side_effect = rc
@@ -402,3 +405,117 @@ class TestRenderClient:
         http.get.side_effect = Exception("connection refused")
         rc = RenderClient(base_url="http://localhost:8000/v1", model="m", http_client=http)
         assert rc.fetch_block_size() is None
+
+
+def test_qcfuse_query_lands_block_aligned_before_generation_prompt():
+    """The appended query must sit inside the span, on a block, before the header.
+
+    The render glues the assistant header onto the LAST unit, which is normally
+    the newest tool result - so a naive append would splice the sentence after
+    "<start_of_turn>model" instead of before it.
+    """
+    from processors import build_pic_prompt
+
+    # msgs[0] system, msgs[1] user, msgs[2] tool result (the span).
+    # full(agp=True) = 40 tokens; the assistant header is the last 4.
+    full = list(range(100, 140))
+    bounds = {1: 5, 2: 20, 3: 36}  # render(messages[:b], agp=False) lengths
+
+    def render_chat(messages, tools=None, add_generation_prompt=True):
+        if add_generation_prompt:
+            return full
+        return full[: bounds[len(messages)]]
+
+    rc = Mock()
+    rc.render_chat.side_effect = render_chat
+
+    msgs = [
+        {"role": "system", "content": "S"},
+        {"role": "user", "content": "U"},
+        {"role": "tool", "tool_call_id": "t1", "content": "OBS"},
+    ]
+    query = [900, 901, 902]
+    built = build_pic_prompt(
+        rc, msgs, None, pad_token_id=60, block_size=16, pic={2},
+        qcfuse_query_token_ids=query,
+    )
+    out = built.token_ids
+    assert built.span_starts == [32], built.span_starts
+    (q_start,) = built.qcfuse_query_starts
+
+    assert q_start % 16 == 0, "query must start on a block so it can be excluded"
+    assert out[q_start : q_start + len(query)] == query
+    # the span's own content precedes the query, the assistant header follows it
+    assert out[q_start - 1] == full[35]
+    assert out[-4:] == full[36:40] and set(out[q_start + len(query) : -4]) == {60}
+    # the query is inside the span chunk, so a PIC hit on the span caches it too
+    span_chunk = [c for c in built.chunks if c["kind"] == "span"][0]
+    assert span_chunk["start"] <= q_start < span_chunk["end"]
+    # content_tokens stays the true span size: our sentence must not inflate it
+    assert span_chunk["content_tokens"] == 16
+
+
+def test_no_query_configured_leaves_prompt_untouched():
+    from processors import build_pic_prompt
+
+    full = list(range(100, 140))
+    bounds = {1: 5, 2: 20, 3: 36}
+
+    def render_chat(messages, tools=None, add_generation_prompt=True):
+        return full if add_generation_prompt else full[: bounds[len(messages)]]
+
+    rc = Mock()
+    rc.render_chat.side_effect = render_chat
+    msgs = [
+        {"role": "system", "content": "S"},
+        {"role": "user", "content": "U"},
+        {"role": "tool", "tool_call_id": "t1", "content": "OBS"},
+    ]
+    base = build_pic_prompt(rc, msgs, None, 60, 16, pic={2})
+    assert base.qcfuse_query_starts == []
+    rc.render_chat.reset_mock()
+    again = build_pic_prompt(rc, msgs, None, 60, 16, pic={2},
+                             qcfuse_query_token_ids=[])
+    assert again.token_ids == base.token_ids
+
+
+def test_qcfuse_query_survives_the_chunk_alignment_pad():
+    """A span that is not the last chunk still reads back its sentence verbatim.
+
+    ``pad_tokens`` inserts padding BEFORE the chunk's last token, so a sentence
+    sitting at the chunk tail gets split by the alignment pad and the engine's
+    cross-check at the declared offset fails -- it raises and kills the
+    EngineCore, which is how every QCFuse backend crash-looped.
+    """
+    from processors import build_pic_prompt
+
+    # msgs[0] system, msgs[1] tool result (the span), msgs[2] user: the span is
+    # followed by another chunk, so it gets the alignment pad.
+    full = list(range(100, 180))
+    bounds = {1: 16, 2: 40, 3: 76}
+
+    def render_chat(messages, tools=None, add_generation_prompt=True):
+        if add_generation_prompt:
+            return full
+        return full[: bounds[len(messages)]]
+
+    rc = Mock()
+    rc.render_chat.side_effect = render_chat
+
+    msgs = [
+        {"role": "system", "content": "S"},
+        {"role": "tool", "tool_call_id": "t1", "content": "OBS"},
+        {"role": "user", "content": "U"},
+    ]
+    query = [900, 901, 902]
+    built = build_pic_prompt(
+        rc, msgs, None, pad_token_id=60, block_size=16, pic={1},
+        qcfuse_query_token_ids=query,
+    )
+    out = built.token_ids
+    (q_start,) = built.qcfuse_query_starts
+    assert q_start % 16 == 0, q_start
+    assert out[q_start : q_start + len(query)] == query, out[q_start : q_start + 6]
+    span_chunk = [c for c in built.chunks if c["kind"] == "span"][0]
+    assert span_chunk["start"] <= q_start < span_chunk["end"]
+    assert (span_chunk["end"] - span_chunk["start"]) % 16 == 0

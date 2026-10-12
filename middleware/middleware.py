@@ -21,10 +21,12 @@ from pydantic import BaseModel, Field
 
 from config_models import MiddlewareConfig
 from processors import PromptProcessor
+from render_client import riding_out_restart
 from logger import MiddlewareLogger
 import request_trace
 import span_policy
 import warmup
+from quest_helpers import coerce_tool_call_args
 
 
 # Request Models
@@ -59,6 +61,7 @@ class ChatCompletionRequest(BaseModel):
     temperature: Optional[float] = Field(
         default=0.0, description="Sampling temperature between 0 and 2", ge=0.0, le=2.0
     )
+    top_logprobs: Optional[int] = None  # KL check: return top-k logprobs + the prompt ids/spans sent
     seed: Optional[int] = Field(
         default=None, description="Random seed for deterministic generation"
     )
@@ -84,22 +87,32 @@ logger = logging.getLogger(__name__)
 
 def process_stream(
     stream,
-) -> tuple[str, Optional[str], Optional[int], Optional[int]]:
+    t0: Optional[float] = None,
+    lp: Optional[list] = None,
+) -> tuple[str, Optional[str], Optional[int], Optional[int], Optional[float]]:
     """
     Process streaming response from the backend.
 
+    Args:
+        t0: perf_counter reading from just before the request was issued. When
+            given, the elapsed time to the first chunk carrying text is returned
+            as ttft_ms — the prefill latency the agent actually waits through,
+            which is the quantity PIC span reuse is supposed to cut.
+
     Returns:
-        Tuple of (full_text, finish_reason, completion_tokens, cached_tokens).
-        Both token counts come from the backend's usage chunk (requires
+        Tuple of (full_text, finish_reason, completion_tokens, cached_tokens,
+        ttft_ms). Both token counts come from the backend's usage chunk (requires
         stream_options={"include_usage": True}). cached_tokens is the KV
         prefix-cache reuse (usage.prompt_tokens_details.cached_tokens),
         defaulting to 0 when the backend reports details but no count; None if
-        the backend didn't report it at all.
+        the backend didn't report it at all. ttft_ms is None when t0 was not
+        given or the stream produced no text.
     """
     full_text = ""
     finish_reason = None
     completion_tokens: Optional[int] = None
     cached_tokens: Optional[int] = None
+    ttft_ms: Optional[float] = None
 
     for chunk in stream:
         # The final usage chunk (include_usage) carries token counts and no choices.
@@ -115,26 +128,49 @@ def process_stream(
         if chunk.choices:
             choice = chunk.choices[0]
             if choice.text:
+                # First text chunk ends prefill; later chunks are decode.
+                if ttft_ms is None and t0 is not None:
+                    ttft_ms = (time.perf_counter() - t0) * 1000
                 full_text += choice.text
             if choice.finish_reason:
                 finish_reason = choice.finish_reason
+            if lp is not None and choice.logprobs:
+                lp.extend(zip(choice.logprobs.tokens, choice.logprobs.top_logprobs))
 
-    return full_text, finish_reason, completion_tokens, cached_tokens
+    return full_text, finish_reason, completion_tokens, cached_tokens, ttft_ms
 
 
 def calculate_usage_info(
     full_prompt: List[int],
     completion_tokens: Optional[int],
+    cached_tokens: Optional[int] = None,
+    warmup_computed_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Build usage info from the prompt token count and the backend's
-    completion_tokens (no local tokenizer)."""
+    completion_tokens (no local tokenizer).
+
+    cached_tokens is surfaced as OpenAI's prompt_tokens_details.cached_tokens so
+    callers can see span KV reuse; without it every client reads 0 no matter how
+    much the warmed-span LRU actually reused.
+
+    warmup_computed_tokens is what span warmup prefilled for THIS request. The
+    real request reports those same tokens as cached, so a caller measuring
+    compute as (prompt_tokens - cached_tokens) alone credits warmup's prefill to
+    nobody and can report over 100% of the achievable saving. Real prefill is
+    ``prompt_tokens - cached_tokens + warmup_computed_tokens``.
+    """
     prompt_tokens = len(full_prompt)
     ct = completion_tokens or 0
-    return {
+    usage: Dict[str, Any] = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": ct,
         "total_tokens": prompt_tokens + ct,
     }
+    if cached_tokens is not None:
+        usage["prompt_tokens_details"] = {"cached_tokens": int(cached_tokens)}
+    if warmup_computed_tokens is not None:
+        usage["warmup_computed_tokens"] = int(warmup_computed_tokens)
+    return usage
 
 
 def warm_sglang_spans(client, prepared, request_id) -> List[Dict[str, Any]]:
@@ -233,6 +269,14 @@ def build_redknot_segments(client, prepared, request_id) -> List[str]:
     return seg_ids
 
 
+def _as_int(v: Any, default: int = 0) -> int:
+    """Int from an env/config string, default when unset or unparseable."""
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def _now_iso() -> str:
     """UTC timestamp for trace records, e.g. 2026-06-09T09:36:12.481Z."""
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -271,85 +315,6 @@ def _trace_chunks(prepared_prompt, warmup_result) -> List[dict]:
     return out
 
 
-def coerce_tool_call_args(
-    tool_calls: List[Dict[str, Any]],
-    tools: Optional[List[Dict[str, Any]]],
-) -> List[Dict[str, Any]]:
-    """Retype tool-call arguments that the backend's /parse returned as strings.
-
-    WHY: vLLM's minimax_m2 tool parser stringifies EVERY argument value, so an argument the
-    tool declares as an array comes back as `"view_range": "[150, 220]"` (a str holding a
-    list). The agent's schema validation then rejects the call -- "Input should be a valid
-    list" -- and the session dies after ~3 steps. On MiniMax this sank every middleware mode
-    to ~15% solved while the two no-middleware modes sat at ~90%; it looked like a KV-cache
-    result and was really a parser bug. The fork's own /v1/chat/completions is unaffected --
-    only the /parse endpoint the middleware depends on.
-
-    Coercion is driven by the DECLARED schema (we get `tools` on the request), never by
-    guessing: only params the tool declares non-string are touched, and only when the string
-    actually parses as that type. A genuine string argument is left exactly as it was.
-    """
-    if not tool_calls or not tools:
-        return tool_calls
-
-    NON_STRING = {"array", "object", "integer", "number", "boolean"}
-
-    def declared_types(spec):
-        """All json types a param may hold. Handles the flat `{"type": "array"}` form AND the
-        Pydantic `Optional[...]` form exgentic emits: `{"anyOf": [{"type":"array",...},
-        {"type":"null"}]}` -- there is NO top-level `type` there, which is exactly what made an
-        earlier version of this skip `view_range` and leave it a string on MiniMax."""
-        if not isinstance(spec, dict):
-            return set()
-        out = set()
-        t = spec.get("type")
-        if isinstance(t, str):
-            out.add(t)
-        elif isinstance(t, list):
-            out.update(x for x in t if isinstance(x, str))
-        for sub in (spec.get("anyOf") or spec.get("oneOf") or spec.get("allOf") or []):
-            out |= declared_types(sub)
-        return out
-
-    # {tool_name: {param: set_of_declared_json_types}}
-    schema: Dict[str, Dict[str, Any]] = {}
-    for t in tools:
-        fn = (t or {}).get("function") or {}
-        name = fn.get("name")
-        props = ((fn.get("parameters") or {}).get("properties")) or {}
-        if not name or not isinstance(props, dict):
-            continue
-        schema[name] = {p: declared_types(spec) for p, spec in props.items()}
-    for tc in tool_calls:
-        fn = (tc or {}).get("function") or {}
-        want = schema.get(fn.get("name"))
-        raw = fn.get("arguments")
-        if not want or not isinstance(raw, str):
-            continue
-        try:
-            args = json.loads(raw)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(args, dict):
-            continue
-        changed = False
-        for key, val in list(args.items()):
-            types = want.get(key) or set()
-            # coerce only if the param can be non-string and is NOT allowed to be a string
-            # (a str|array union means the model may legitimately mean the string form).
-            if not isinstance(val, str) or not (types & NON_STRING) or "string" in types:
-                continue
-            try:
-                parsed_val = json.loads(val)
-            except (ValueError, TypeError):
-                continue  # not JSON after all -> the model really meant a string
-            args[key] = parsed_val
-            changed = True
-        if changed:
-            fn["arguments"] = json.dumps(args)
-    return tool_calls
-
-
 def build_response(
     request_id: str,
     full_text: str,
@@ -357,6 +322,7 @@ def build_response(
     usage_info: Optional[dict],
     reasoning_content: Optional[str] = None,
     tool_calls: Optional[List[Dict[str, Any]]] = None,
+    model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Build the final response object.
@@ -368,6 +334,10 @@ def build_response(
         usage_info: Token usage dict
         reasoning_content: Reasoning span extracted from the raw output, if any
         tool_calls: Structured tool_calls list, if any
+        model: Model name to echo back. Omitting it is not cosmetic: tau2 runs
+            `re.match(pattern, response.model)` on every turn and dies with
+            "expected string or bytes-like object, got 'NoneType'", so a null
+            here fails 100% of agent turns behind this middleware.
 
     Returns:
         Response dictionary in OpenAI format
@@ -383,6 +353,8 @@ def build_response(
     return {
         "id": f"chatcmpl-{request_id}",
         "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
         "usage": usage_info,
         "choices": [
             {
@@ -441,6 +413,8 @@ def create_app(
         config.processing.warmup.enabled = (
             os.environ["MIDDLEWARE_WARMUP_ENABLED"].lower() in ("1", "true", "yes")
         )
+        if not config.processing.warmup.enabled:
+            logger.warning("MIDDLEWARE_WARMUP_ENABLED=false: vLLM requests with spans are still warmed")
     if "MIDDLEWARE_WARMUP_CACHE_SIZE" in os.environ:
         config.processing.warmup.cache_size = int(
             os.environ["MIDDLEWARE_WARMUP_CACHE_SIZE"]
@@ -456,11 +430,26 @@ def create_app(
             os.environ["MIDDLEWARE_MIN_SPAN_TOKENS"]
         )
 
+    # QCFuse query sentence, as token ids, appended to every span tail. Set only on
+    # qcfuse-* arms; the same list must reach the backend as its env of the same name.
+    if os.environ.get("MIDDLEWARE_QCFUSE_QUERY_TOKEN_IDS"):
+        config.processing.qcfuse_query_token_ids = [
+            int(x) for x in
+            os.environ["MIDDLEWARE_QCFUSE_QUERY_TOKEN_IDS"].split(",") if x.strip()
+        ]
+
     # SPAN_MODE selects the KV-reuse behavior. "naive" reuses span KV but sends NO
     # cross_span_starts - vLLM then stitches reused spans back in without the
     # in-context cross-correction, which is the naive (position-uncorrected) baseline
     # the spans/legolink work is measured against. spans/legolink keep cross markers.
     span_mode = os.environ.get("SPAN_MODE", "spans").lower()
+    # Under the gap policy the backend deliberately RECOMPUTES the first
+    # gap_length tokens of every span, so the real request can never hit them.
+    # Warmup must expect that much less or it declares the cache stale every
+    # request and re-warms in a loop. Env wins; otherwise legolink-<N> carries N.
+    gap_length = _as_int(os.environ.get("VLLM_V1_SPANS_GAP_LENGTH"))
+    if not gap_length and span_mode.startswith("legolink-"):
+        gap_length = _as_int(span_mode.split("-", 1)[1])
 
     app = FastAPI(title="Middleware")
 
@@ -539,6 +528,7 @@ def create_app(
     app.state.sglang_client = sglang_client
 
     app.state.span_mode = span_mode
+    app.state.gap_length = gap_length
 
     @app.on_event("startup")
     async def startup_event():
@@ -589,21 +579,6 @@ def create_app(
         sampling_xb = {k: v for k, v in (("top_k", request.top_k),
             ("min_p", request.min_p),
             ("repetition_penalty", request.repetition_penalty)) if v is not None}
-
-        # QUEST: follow every tool-output run with a short review query so a
-        # span never ends the prompt - the gap recompute always has a real
-        # post-span query to score prefix blocks against. Deterministic per
-        # conversation prefix, so prefix caching is unaffected.
-        if app.state.span_mode.startswith("quest"):
-            injected: list[dict] = []
-            for i, m in enumerate(messages):
-                injected.append(m)
-                nxt = messages[i + 1] if i + 1 < len(messages) else None
-                if m.get("role") == "tool" and (nxt is None or nxt.get("role") != "tool"):
-                    injected.append(
-                        {"role": "user", "content": "Review the tool output."}
-                    )
-            messages = injected
 
         # The active span policy decides which messages are reusable PIC spans.
         pic = app.state.span_policy.select_spans(messages)
@@ -689,21 +664,13 @@ def create_app(
             raise
         render_ms = (time.perf_counter() - t0) * 1000
         full_prompt = prepared_prompt.token_ids
-        span_starts = prepared_prompt.span_starts
+        span_starts = [] if os.environ.get("MIDDLEWARE_PAD_ONLY", "0") == "1" else prepared_prompt.span_starts  # pad-only control: chunk and pad exactly as the span arms, declare no spans
         cross_span_starts = prepared_prompt.cross_span_starts
 
         logger.debug(
             "Request %s: Prompt processed, %d tokens, %d spans",
             request_id, len(full_prompt), len(span_starts),
         )
-
-        # Cap the completion so prompt + output fits the backend context window.
-        # Injected review turns (and span padding) are invisible to the agent's
-        # own truncation math, so near-cap prompts would otherwise 400 with
-        # "maximum context length is N tokens".
-        ctx_limit = int(os.environ.get("BACKEND_MAX_MODEL_LEN", "92160"))
-        if max_tokens is not None:
-            max_tokens = max(16, min(max_tokens, ctx_limit - len(full_prompt)))
 
         # Use backend model if configured, otherwise use request model
         backend_model = config.backend.model if config.backend.model else model
@@ -722,7 +689,12 @@ def create_app(
         n_span_chunks = sum(
             1 for ch in prepared_prompt.chunks if ch.get("kind") == "span"
         )
-        if config.processing.warmup.enabled:
+        # vLLM spans are always warmed: a cold span is encoded isolated and never repaired
+        # ponytail: SpanCache dedup can skip an evicted span until revalidate re-warms it
+        warm_on = config.processing.warmup.enabled or (
+            bool(span_starts) and not app.state.is_sglang
+        )
+        if warm_on:
             t0 = time.perf_counter()
             try:
                 if app.state.is_sglang and os.environ.get("QCFUSE_RATIO"):
@@ -746,7 +718,7 @@ def create_app(
                 else:
                     warmup_result = warmup.warm_pic(
                         app.state.client, prepared_prompt, backend_model, temperature, seed,
-                        cache=app.state.span_cache,
+                        cache=app.state.span_cache, gap_length=app.state.gap_length,
                     )
             except Exception as e:
                 # A swallowed RedKnot build error is exactly the silent-failure mode we
@@ -806,10 +778,20 @@ def create_app(
                 xargs = {"span_starts": span_starts}
                 if cross_span_starts and app.state.span_mode != "naive":
                     xargs["cross_span_starts"] = cross_span_starts
+                # Exact offsets of the appended QCFuse query, one per span. The
+                # engine cross-checks them against its own copy of the token ids
+                # rather than scanning, so a config skew fails loud.
+                if prepared_prompt.qcfuse_query_starts:
+                    xargs["qcfuse_query_starts"] = prepared_prompt.qcfuse_query_starts
                 extra_body["vllm_xargs"] = xargs
+            if request.top_logprobs:
+                completion_params["logprobs"] = request.top_logprobs
+                extra_body["return_tokens_as_token_ids"] = True
             completion_params["extra_body"] = extra_body
+            lp_list = [] if request.top_logprobs else None
 
             t0 = time.perf_counter()
+            ttft_ms: Optional[float] = None  # SGLang path is non-streaming here.
             if app.state.is_sglang:
                 # SGLang path: drive its native /generate with the pre-tokenized
                 # PIC prompt (input_ids). Same token_ids the span policy built, so
@@ -876,10 +858,22 @@ def create_app(
                 # cached_tokens on the REAL request = KV reused from the warmed spans.
                 cached_tokens = gen.get("cached_tokens")
             else:
-                stream = app.state.client.completions.create(**completion_params)
-                # Process stream
-                full_text, finish_reason, completion_tokens, cached_tokens = (
-                    process_stream(stream)
+                # Re-issued from scratch if a pod restart cuts the stream: the
+                # caller wants a completion, not a report that one attempt died.
+                # Re-timed per attempt: a restart-and-retry must not report the
+                # dead attempt's prefill as this one's TTFT. The clock has to
+                # start before create(), which is what actually issues the request.
+                def _generate():
+                    started = time.perf_counter()
+                    if lp_list:
+                        lp_list.clear()
+                    return process_stream(
+                        app.state.client.completions.create(**completion_params),
+                        t0=started, lp=lp_list,
+                    )
+
+                full_text, finish_reason, completion_tokens, cached_tokens, ttft_ms = (
+                    riding_out_restart(_generate, "generation")
                 )
             final_ms = (time.perf_counter() - t0) * 1000
             if cached_tokens is None:
@@ -910,12 +904,12 @@ def create_app(
         # primed, a span we trusted wasn't cached (eviction) — drop those keys
         # and re-warm so the next request is primed. No-op if the backend doesn't
         # report cached_tokens. vLLM-only (uses /completions warmup). Best-effort.
-        if config.processing.warmup.enabled and not app.state.is_sglang:
+        if warm_on and not app.state.is_sglang:
             try:
                 warmup.revalidate(
                     app.state.client, prepared_prompt, cached_tokens,
                     warmup_result, backend_model, temperature, seed,
-                    cache=app.state.span_cache,
+                    cache=app.state.span_cache, gap_length=app.state.gap_length,
                 )
             except Exception as e:
                 logger.warning(
@@ -947,11 +941,14 @@ def create_app(
 
         tool_calls_payload: Optional[List[Dict[str, Any]]] = None
         if parsed.get("tools_called") and parsed.get("tool_calls"):
+            # Every mode needs this: vLLM's minimax_m2 /parse stringifies array args.
             tool_calls_payload = coerce_tool_call_args(parsed["tool_calls"], tools)
 
         # Usage: prompt_tokens from the rendered token list, completion_tokens
         # from the backend's usage chunk (no local tokenizer).
-        usage_info = calculate_usage_info(full_prompt, completion_tokens)
+        usage_info = calculate_usage_info(
+            full_prompt, completion_tokens, cached_tokens,
+            warmup_result.computed_tokens if warmup_result else None)
 
         # Metrics (the /v1/metrics endpoint); the per-request trace below
         # replaces the old response_req_*.json files.
@@ -985,8 +982,10 @@ def create_app(
             {
                 "span_starts_sent": span_starts,
                 "cross_span_starts_sent": cross_span_starts,
+                "qcfuse_query_starts_sent": prepared_prompt.qcfuse_query_starts,
                 "reuse_check": reuse_check,
                 "round_trip_ms": round(final_ms, 1),
+                "ttft_ms": round(ttft_ms, 1) if ttft_ms is not None else None,
                 "usage": {
                     "prompt_tokens": usage_info["prompt_tokens"],
                     "cached_tokens": cached_tokens,
@@ -1004,14 +1003,19 @@ def create_app(
         )
 
         # Build and return response
-        return build_response(
+        resp = build_response(
             request_id,
             full_text,
             finish_reason,
             usage_info,
             reasoning_content=reasoning_content,
             tool_calls=tool_calls_payload,
+            model=backend_model,
         )
+        if lp_list is not None:
+            resp["kl"] = {"prompt_token_ids": full_prompt, "span_starts": span_starts,
+                          "cross_span_starts": cross_span_starts, "logprobs": lp_list}
+        return resp
 
     return app
 

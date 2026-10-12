@@ -109,12 +109,12 @@ def test_plain_completion_happy_path(mock_render_cls, mock_openai, tmp_path):
     msg = body["choices"][0]["message"]
     assert msg["content"] == "Hello"
     assert body["choices"][0]["finish_reason"] == "stop"
-    # usage: prompt_tokens = rendered length (40), completion_tokens from stream
-    assert body["usage"]["prompt_tokens"] == 40
+    # the lone message is a trailing span: split at gen_start 18, padded to 32, + 22-token gen tail
+    assert body["usage"]["prompt_tokens"] == 54
     assert body["usage"]["completion_tokens"] == 2
     # the real generate call carried the prompt token ids
     real = [c for c in openai_inst.completions.create.call_args_list if c.kwargs.get("stream")]
-    assert real and real[0].kwargs["prompt"] == list(range(40))
+    assert real and real[0].kwargs["prompt"] == list(range(17)) + [60] * 14 + list(range(17, 40))
 
 
 @patch("middleware.OpenAI")
@@ -133,7 +133,10 @@ def test_span_starts_forwarded(mock_render_cls, mock_openai, tmp_path):
     })
     assert r.status_code == 200
     real = [c for c in openai_inst.completions.create.call_args_list if c.kwargs.get("stream")][0]
-    assert real.kwargs["extra_body"] == {"vllm_xargs": {"span_starts": [0, 32]}}
+    assert real.kwargs["extra_body"] == {
+        "skip_special_tokens": False,
+        "vllm_xargs": {"span_starts": [0, 32], "cross_span_starts": [64]},
+    }
 
 
 @patch("middleware.OpenAI")
@@ -184,6 +187,24 @@ def test_warmup_fires_per_span_when_enabled(mock_render_cls, mock_openai, tmp_pa
 
 @patch("middleware.OpenAI")
 @patch("processors.RenderClient")
+def test_spans_warm_even_when_warmup_disabled(mock_render_cls, mock_openai, tmp_path):
+    parsed = {"content": "ok", "reasoning_content": None, "tool_calls": None, "tools_called": False}
+    app, openai_inst, _ = _build_app(
+        tmp_path, warmup=False, parse_result=parsed,
+        mock_render_cls=mock_render_cls, mock_openai=mock_openai,
+    )
+    r = TestClient(app).post("/v1/chat/completions", json={
+        "model": "test-model",
+        "messages": [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+    })
+    assert r.status_code == 200
+    warmups = [c for c in openai_inst.completions.create.call_args_list
+               if not c.kwargs.get("stream")]
+    assert len(warmups) == 2  # a cold span would be encoded isolated and never repaired
+
+
+@patch("middleware.OpenAI")
+@patch("processors.RenderClient")
 def test_warmup_dedups_across_requests(mock_render_cls, mock_openai, tmp_path):
     parsed = {"content": "ok", "reasoning_content": None, "tool_calls": None, "tools_called": False}
     app, openai_inst, _ = _build_app(
@@ -230,7 +251,10 @@ def test_sparse_span_policy_drives_spans(mock_render_cls, mock_openai, tmp_path)
                      {"role": "assistant", "content": "c"}]})
     assert r.status_code == 200
     real = [c for c in openai_inst.completions.create.call_args_list if c.kwargs.get("stream")][0]
-    assert real.kwargs["extra_body"] == {"vllm_xargs": {"span_starts": [32], "cross_span_starts": [64]}}
+    assert real.kwargs["extra_body"] == {
+        "skip_special_tokens": False,
+        "vllm_xargs": {"span_starts": [32], "cross_span_starts": [64]},
+    }
     warmups = [c for c in openai_inst.completions.create.call_args_list if not c.kwargs.get("stream")]
     assert len(warmups) == 2          # span m1 (phase 1) + cumulative up to it (phase 2)
 
@@ -342,7 +366,7 @@ def test_error_trace_on_render_failure(mock_render_cls, mock_openai, tmp_path):
 # --------------------------------------------------------------------------- #
 def test_process_stream_extracts_text_and_tokens():
     from middleware import process_stream
-    text, finish, completion, cached = process_stream(
+    text, finish, completion, cached, _ttft = process_stream(
         _fake_stream(text="Hi", finish="stop", completion_tokens=3, cached=7),
     )
     assert text == "Hi"
@@ -356,6 +380,15 @@ def test_calculate_usage_info():
     u = calculate_usage_info([1, 2, 3, 4], completion_tokens=5)
     assert u == {"prompt_tokens": 4, "completion_tokens": 5,
                  "total_tokens": 9}
+
+
+def test_calculate_usage_info_reports_cached_tokens():
+    from middleware import calculate_usage_info
+    u = calculate_usage_info([1, 2, 3, 4], completion_tokens=5, cached_tokens=3)
+    assert u["prompt_tokens_details"] == {"cached_tokens": 3}
+    # 0 must still be reported: "no reuse" and "backend didn't say" differ.
+    u0 = calculate_usage_info([1, 2], completion_tokens=1, cached_tokens=0)
+    assert u0["prompt_tokens_details"] == {"cached_tokens": 0}
 
 
 def test_build_response_tool_calls_force_finish_reason():
@@ -375,3 +408,13 @@ def test_build_response_plain():
     msg = resp["choices"][0]["message"]
     assert msg == {"role": "assistant", "content": "hello"}
     assert resp["choices"][0]["finish_reason"] == "stop"
+
+
+def test_calculate_usage_info_reports_warmup_compute():
+    from middleware import calculate_usage_info
+    u = calculate_usage_info([1] * 100, completion_tokens=5,
+                             cached_tokens=90, warmup_computed_tokens=70)
+    # real prefill is 100 - 90 + 70 = 80, not the 10 that cached_tokens alone implies
+    assert u["warmup_computed_tokens"] == 70
+    assert u["prompt_tokens"] - u["prompt_tokens_details"]["cached_tokens"] \
+        + u["warmup_computed_tokens"] == 80

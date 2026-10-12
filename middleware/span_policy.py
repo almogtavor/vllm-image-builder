@@ -20,19 +20,84 @@ class SpanPolicy(ABC):
 
 
 class AllMessagesSpanPolicy(SpanPolicy):
-    """Every message is its own span (default)."""
+    """Every message is its own span (default).
+
+    Note this spans the system prompt and the final user turn too, which makes
+    the live query attention-isolated from the context it is asking about. Use
+    :class:`ContextMessagesSpanPolicy` for retrieval/agent shapes where the
+    context recurs but the query must still read it.
+    """
 
     def select_spans(self, messages: List[dict]) -> Set[int]:
         return set(range(len(messages)))
 
 
-class ToolFileReadSpanPolicy(SpanPolicy):
-    """Span = ``bash`` tool response whose invoking command reads a code file.
+class ContextMessagesSpanPolicy(SpanPolicy):
+    """Span = a context-carrying message, never the system prompt or the live query.
 
-    A command qualifies when a read verb (cat/head/tail/grep/rg/sed/awk/
-    less/more) and a code-file extension both appear, and none of the
-    :attr:`_REJECTERS` (writes, ``sed -i``, interpreter at command position,
-    ``grep -l``) match. Pure regex; no shell parsing.
+    For retrieval and web-agent shapes the reusable content arrives as ordinary
+    user/tool messages (a retrieved passage, a serialized page) rather than as a
+    bash tool result, so :class:`ToolFileReadSpanPolicy` selects nothing. Spanning
+    *everything* instead is worse than useless: a span attends only to itself, so
+    making the final user turn a span leaves the question unable to read the
+    passages, and the model answers from nothing.
+
+    Keep the system prompt and the last message in-context; everything between
+    them is reusable content.
+    """
+
+    def select_spans(self, messages: List[dict]) -> Set[int]:
+        spans = {
+            i for i, m in enumerate(messages[:-1])
+            if i > 0 and m.get("role") in ("user", "tool")
+        }
+        logger.debug("context_messages: %d/%d messages selected as spans",
+                     len(spans), len(messages))
+        return spans
+
+
+class PastContextSpanPolicy(SpanPolicy):
+    """Span = context that is NOT the message the model is currently reasoning over.
+
+    A sliding-window web agent sends ``[system, obs_t-k .. obs_t-1, obs_t, task]``. The
+    reusable content is the RETAINED observations: they recur verbatim at a shifted offset
+    every step. ``obs_t`` never recurs - it is new by construction - so spanning it buys no
+    reuse at all, while costing exactly what a span costs: it attends only to itself, and it
+    is the page the agent must read to choose its next action.
+
+    So keep the system prompt, the current observation and the task in-context, and span only
+    what came before. Same reasoning as ContextMessagesSpanPolicy, applied one message
+    further left because in this shape the live query spans TWO trailing messages.
+    """
+
+    def select_spans(self, messages: List[dict]) -> Set[int]:
+        spans = {
+            i for i, m in enumerate(messages[:-2])
+            if i > 0 and m.get("role") in ("user", "tool")
+        }
+        logger.debug("past_context: %d/%d messages selected as spans",
+                     len(spans), len(messages))
+        return spans
+
+
+class ToolFileReadSpanPolicy(SpanPolicy):
+    """Span = a tool response produced by a deterministic code-file read.
+
+    Two read seams qualify:
+
+    * ``bash`` -- the command must pair a read verb (cat/head/tail/grep/rg/sed/
+      awk/less/more) with a code-file extension, and match none of the
+      :attr:`_REJECTERS` (writes, ``sed -i``, interpreter at command position,
+      ``grep -l``). Pure regex; no shell parsing.
+    * ``view`` -- the structured file-editor read tool. EVERY view response is
+      accepted, whatever the path: the tool is read-only by construction, so the
+      code-extension gate that `bash` needs (to separate reads from writes) only
+      discarded reusable bytes here. Ranged views (``view_range``) count
+      too, matching the existing acceptance of ``sed -n '1,40p' main.go``.
+
+    ``view`` was added to the agent after this policy was written, and a
+    bash-only gate silently excluded it -- the agent's main file-read path,
+    carrying most of the reusable bytes -- from ever becoming a span.
     """
 
     _CODE_EXTS: Tuple[str, ...] = (
@@ -79,27 +144,41 @@ class ToolFileReadSpanPolicy(SpanPolicy):
     )
 
     def select_spans(self, messages: List[dict]) -> Set[int]:
-        # Map each bash tool_call id -> its command string.
-        cmd_by_id: Dict[str, str] = {}
+        # Map each tool_call id -> a description of the deterministic read it made.
+        # Two seams qualify: `bash` read commands, and the structured `view` tool.
+        # Gating on bash alone missed `view` entirely, which is the agent's main
+        # file-read path and carries most of the reusable bytes.
+        read_by_id: Dict[str, str] = {}
         for m in messages:
             for tc in (m.get("tool_calls") or []):
                 fn = tc.get("function") or {}
-                if not self._is_bash(fn.get("name")):
+                tid = tc.get("id")
+                if not tid:
                     continue
-                cmd = self._command(fn.get("arguments"))
-                if cmd and tc.get("id"):
-                    cmd_by_id[tc["id"]] = cmd
+                name = fn.get("name")
+                if self._is_bash(name):
+                    cmd = self._command(fn.get("arguments"))
+                    if cmd and self._is_code_read(cmd):
+                        read_by_id[tid] = "code-file read: " + cmd
+                elif self._is_view(name):
+                    # EVERY view response is a span. The extension gate exists to
+                    # tell reads from writes in `bash`; `view` is read-only by
+                    # construction, so filtering it only dropped reusable bytes --
+                    # extensionless files (Makefile, Dockerfile), unlisted types
+                    # (.rst, .xml, .html, .cfg, .lock) and directory listings all
+                    # fell through despite being deterministic reads.
+                    path = self._arg(fn.get("arguments"), "path")
+                    read_by_id[tid] = "view: " + (path or "<no path>")
 
         spans: Set[int] = set()
         for i, m in enumerate(messages):
             if m.get("role") != "tool":
                 continue
-            cmd = cmd_by_id.get(m.get("tool_call_id"))
-            if cmd and self._is_code_read(cmd):
+            src = read_by_id.get(m.get("tool_call_id"))
+            if src:
                 spans.add(i)
                 logger.info(
-                    "tool_file_read: caught msg[%d] as PIC span — code-file read: %s",
-                    i, cmd[:120],
+                    "tool_file_read: caught msg[%d] as PIC span — %s", i, src[:120],
                 )
         if spans and logger.isEnabledFor(logging.INFO):
             logger.info(
@@ -114,16 +193,27 @@ class ToolFileReadSpanPolicy(SpanPolicy):
         return isinstance(name, str) and name.endswith("bash")
 
     @staticmethod
-    def _command(arguments: object) -> Optional[str]:
+    def _is_view(name: object) -> bool:
+        # The structured file-editor read tool. Exact match plus namespaced
+        # variants only -- endswith("view") alone would also catch "preview".
+        return isinstance(name, str) and (name == "view" or name.endswith("__view"))
+
+    @staticmethod
+    def _arg(arguments: object, key: str) -> Optional[str]:
+        """One string argument off a tool call, whose args may be a JSON string."""
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
             except (ValueError, TypeError):
                 return None
         if isinstance(arguments, dict):
-            cmd = arguments.get("command")
-            return cmd if isinstance(cmd, str) else None
+            v = arguments.get(key)
+            return v if isinstance(v, str) else None
         return None
+
+    @classmethod
+    def _command(cls, arguments: object) -> Optional[str]:
+        return cls._arg(arguments, "command")
 
     @classmethod
     def _is_code_read(cls, command: str) -> bool:
@@ -156,6 +246,8 @@ class AllToolResponsesSpanPolicy(SpanPolicy):
 # Available policies by config name. Add new policies here.
 _POLICIES: Dict[str, Type[SpanPolicy]] = {
     "all_messages": AllMessagesSpanPolicy,
+    "context_messages": ContextMessagesSpanPolicy,
+    "past_context": PastContextSpanPolicy,
     "tool_file_read": ToolFileReadSpanPolicy,
     "tool_responses": AllToolResponsesSpanPolicy,
     "none": NoSpansPolicy,

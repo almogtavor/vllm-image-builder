@@ -36,12 +36,15 @@ class BuiltPrompt:
       "source_messages", "content_tokens"}`` — drives warmup and the request trace
       (content_tokens is the unpadded length; end-start includes padding).
     - ``render_calls``: render-endpoint round trips this build actually made.
+    - ``qcfuse_query_starts``: block-aligned offset of the query sentence inside
+      each span, in span order. Empty unless the query append is configured.
     """
     token_ids: List[int] = field(default_factory=list)
     span_starts: List[int] = field(default_factory=list)
     cross_span_starts: List[int] = field(default_factory=list)
     chunks: List[dict] = field(default_factory=list)
     render_calls: int = 0
+    qcfuse_query_starts: List[int] = field(default_factory=list)
 
 
 def _digest(data: str) -> str:
@@ -254,6 +257,37 @@ def _unit_boundaries(
     return full, unit_end, calls
 
 
+def _gen_prompt_start(
+    render_client: RenderClient,
+    messages: List[dict],
+    tools: Optional[List[dict]],
+    full: List[int],
+    cache: Optional[BoundaryCache],
+) -> Tuple[int, int]:
+    """Offset where the generation prompt begins in ``full``, and renders spent.
+
+    ``full`` is rendered with ``add_generation_prompt=True``, so its tail is the
+    assistant header. The QCFuse query has to sit before that header, not after
+    it, or the model reads its own turn marker mid-sentence.
+    """
+    key = BoundaryCache.key(messages, tools) if cache is not None else None
+    if cache is not None:
+        hit = cache.get(key)
+        if hit is not None and hit[1] == _tok_digest(full[: hit[0]]):
+            return hit[0], 0
+    prefix = render_client.render_chat(
+        messages, tools=tools, add_generation_prompt=False
+    )
+    if full[: len(prefix)] != prefix:
+        raise ValueError(
+            "render is not prefix-stable at the generation prompt: "
+            "render(messages) is not a prefix of render(messages, add_generation)"
+        )
+    if cache is not None:
+        cache.put(key, (len(prefix), _tok_digest(prefix)))
+    return len(prefix), 1
+
+
 def build_pic_prompt(
     render_client: RenderClient,
     messages: List[dict],
@@ -263,6 +297,7 @@ def build_pic_prompt(
     pic: Optional[set] = None,
     boundary_cache: Optional[BoundaryCache] = None,
     min_span_tokens: int = 0,
+    qcfuse_query_token_ids: Optional[List[int]] = None,
 ) -> BuiltPrompt:
     """Build the prompt, treating ``pic`` message indices as reusable spans.
 
@@ -327,18 +362,48 @@ def build_pic_prompt(
             groups.append(("non", u, v))
             u = v
 
+    query = list(qcfuse_query_token_ids or ())
+    gen_start = len(full)
+    if query or groups[-1][0] == "span":
+        gen_start, extra = _gen_prompt_start(
+            render_client, messages, tools, full, boundary_cache)
+        render_calls += extra
+
     out: List[int] = []
     chunks: List[dict] = []
+    query_starts: List[int] = []
     for gi, (kind, ua, ub) in enumerate(groups):
-        seg = full[unit_start[ua]:unit_end[ub - 1]]  # raw tokens for units [ua, ub)
+        a, b = unit_start[ua], unit_end[ub - 1]
+        last = gi == len(groups) - 1
+        # A trailing span would stretch its span-local lb over the generation prompt and
+        # decode, hiding the prefix: end it at gen_start so an in-context tail gets a cross.
+        split = last and kind == "span" and a < gen_start < b
+        if last and kind == "span" and not split:
+            kind = "non"
+        seg = full[a:gen_start] if split else full[a:b]  # raw tokens for units [ua, ub)
         raw_len = len(seg)
         start = len(out)
-        if gi != len(groups) - 1:  # pad every chunk except the last (tail) to align the next
+        if query and kind == "span":
+            # The query rides at the span's tail, block-aligned, so the selector can
+            # rank the span's content blocks and exclude the query's own. It stays
+            # inside the span, so a PIC hit on the span caches it too.
+            cut = min(gen_start, b) - a
+            body = pad_tokens(seg[:cut], pad_token_id, block_size)
+            query_starts.append(start + len(body))
+            tail = seg[cut:]
+            if not tail and (not last or split):  # else the chunk pad below, which goes before the last token, splits the sentence
+                tail = [pad_token_id] * ((-len(query)) % block_size)
+            seg = body + query + tail
+        if not last or split:  # pad every chunk except the last (tail) to align the next
             seg = pad_tokens(seg, pad_token_id, block_size)
         out.extend(seg)
+        src = list(range(units[ua][0], units[ub - 1][1]))
         chunks.append({"kind": kind, "start": start, "end": len(out),
-                       "source_messages": list(range(units[ua][0], units[ub - 1][1])),
-                       "content_tokens": raw_len})
+                       "source_messages": src, "content_tokens": raw_len})
+        if split:
+            out.extend(full[gen_start:b])
+            chunks.append({"kind": "non", "start": chunks[-1]["end"], "end": len(out),
+                           "source_messages": src, "content_tokens": b - gen_start})
 
     span_starts = [c["start"] for c in chunks if c["kind"] == "span"]
     span_start_set = set(span_starts)
@@ -352,7 +417,8 @@ def build_pic_prompt(
         and gi != len(chunks) - 1
         and c["end"] not in span_start_set
     ]
-    return BuiltPrompt(out, span_starts, cross_span_starts, chunks, render_calls)
+    return BuiltPrompt(out, span_starts, cross_span_starts, chunks, render_calls,
+                       query_starts)
 
 
 class PromptProcessor:
@@ -407,4 +473,5 @@ class PromptProcessor:
             pic,
             boundary_cache=self.boundary_cache,
             min_span_tokens=self.config.processing.min_span_tokens,
+            qcfuse_query_token_ids=self.config.processing.qcfuse_query_token_ids,
         )

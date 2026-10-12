@@ -101,6 +101,30 @@ def test_warm_pic_returns_result_with_expected_tokens():
     assert len(result.primed_keys) == 2           # one key per span
 
 
+def test_warm_pic_expectation_discounts_the_gap():
+    # gap_length tokens per span are recomputed by the backend, so they can never
+    # come back as hits: 2 spans x (32 - 24) = 16.
+    result = warm_pic(_client(), _two_span_built(), model="m", gap_length=24)
+    assert result.expected_cached_tokens == 16
+    # A gap covering the whole span expects nothing, so revalidate cannot fire.
+    whole = warm_pic(_client(), _two_span_built(), model="m", gap_length=32)
+    assert whole.expected_cached_tokens == 0
+    assert revalidate(_client(), _two_span_built(), 0, whole, model="m") is False
+
+
+def test_warm_pic_counts_what_warmup_itself_prefilled():
+    # The real request reports warmup's prefill as cached_tokens, so warmup must
+    # report what it computed or the caller's "saved" figure exceeds 100%.
+    client = _client()
+    result = warm_pic(client, _two_span_built(), model="m")
+    assert result.computed_tokens > 0
+    # a span already in the LRU is skipped, so it adds no new compute
+    cache = SpanCache(maxsize=64)
+    first = warm_pic(_client(), _two_span_built(), model="m", cache=cache)
+    again = warm_pic(_client(), _two_span_built(), model="m", cache=cache)
+    assert first.computed_tokens > 0 and again.computed_tokens == 0
+
+
 def test_span_cache_lru():
     c = SpanCache(maxsize=2)
     assert not c.seen(1)
