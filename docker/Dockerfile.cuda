@@ -88,6 +88,11 @@ ARG TRANSFORMERS_VERSION=5.12.1
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install "transformers==${TRANSFORMERS_VERSION}"
 
+# cuda-bindings 13.4 dropped cudaIpcMemHandle_t.reserved: MiniMax Lamport fused AR+RMSNorm falls back to unfused
+ARG CUDA_BINDINGS_VERSION=13.0.3
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install "cuda-bindings==${CUDA_BINDINGS_VERSION}" "cuda-python==${CUDA_BINDINGS_VERSION}"
+
 # Runtime environment
 ENV VLLM_USAGE_SOURCE=production-docker-image \
     VLLM_WORKER_MULTIPROC_METHOD=fork \
